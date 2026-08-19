@@ -141,6 +141,10 @@ export class HeuristicAttentionProvider
       brainflowConcentration === null || brainflowConcentration === undefined
         ? mapRelativeValueToScore(baselineRelativeValue)
         : clamp(brainflowConcentration * 100, 0, 100);
+    if (mappedScore === null) {
+      this.rejectWindow("missing_metric");
+      return null;
+    }
     this.smoothedScore =
       this.smoothedScore === null
         ? mappedScore
@@ -179,8 +183,8 @@ export class HeuristicAttentionProvider
   }
 }
 
-function mapRelativeValueToScore(value: number | null) {
-  if (value === null || !Number.isFinite(value)) return 50;
+function mapRelativeValueToScore(value: number | null): number | null {
+  if (value === null || !Number.isFinite(value)) return null;
 
   return clamp(50 + Math.log2(Math.max(0.05, value)) * 22, 0, 100);
 }

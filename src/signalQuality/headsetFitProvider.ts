@@ -95,7 +95,7 @@ export class HeuristicHeadsetFitProvider implements HeadsetFitProvider {
       return this.snapshot;
     }
 
-    if (!frame || nowMs - frame.receivedAtMs > this.thresholds.staleFrameMs) {
+    if (!frame || frameAgeMs(frame.receivedAtMs, nowMs) > this.thresholds.staleFrameMs) {
       this.stableSinceMs = null;
       this.snapshot = {
         ...createInitialSnapshot(nowMs),
@@ -382,6 +382,14 @@ function sideAdjustment(channels: ChannelSignalQuality[]) {
 
 function allFlat(channels: ChannelSignalQuality[]) {
   return channels.length > 0 && channels.every((channel) => channel.stdDevUv < 0.25);
+}
+
+function frameAgeMs(frameReceivedAtMs: number, performanceNowMs: number) {
+  const epochTimestampThresholdMs = 1_000_000_000_000;
+  const currentClockMs =
+    frameReceivedAtMs > epochTimestampThresholdMs ? Date.now() : performanceNowMs;
+
+  return Math.max(0, currentClockMs - frameReceivedAtMs);
 }
 
 function scoreForState(state: "poor" | "adjusting" | "good") {

@@ -45,10 +45,11 @@ import {
 
 const maxHistorySamples = 640;
 const fitCheckDurationMs = 3500;
+const streamStaleMs = 2000;
 type AppView = "dashboard" | "training";
 
-function formatValue(value: number) {
-  if (!Number.isFinite(value)) return "n/a";
+function formatValue(value: number | null | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "--";
   return value.toFixed(2);
 }
 
@@ -85,6 +86,7 @@ export default function App() {
   const recordingActiveRef = useRef(false);
   const fitSnapshotRef = useRef<HeadsetFitSnapshot | null>(null);
   const fitCheckTimeoutRef = useRef<number | null>(null);
+  const lastFrameArrivedAtRef = useRef<number | null>(null);
   const sampleCountRef = useRef(0);
   const frameCountRef = useRef(0);
   const [state, setState] = useState<EegConnectionState>("idle");
@@ -147,6 +149,7 @@ export default function App() {
       onSignalFrame: (frame) => {
         if (frame.sensor !== "eeg") return;
 
+        lastFrameArrivedAtRef.current = performance.now();
         setLatestFrame(frame);
         if (recordingActiveRef.current) {
           recordingFramesRef.current.push(frame);
@@ -197,6 +200,7 @@ export default function App() {
     setFrameCount(0);
     setPlotHistory({});
     setLatestFrame(null);
+    lastFrameArrivedAtRef.current = null;
     setRecording(false);
     recordingActiveRef.current = false;
     setRecordedFrameCount(0);
@@ -233,6 +237,13 @@ export default function App() {
     state === "disconnecting";
   const connected = state === "connected" || state === "streaming";
 
+  function clearCurrentSignal() {
+    setLatest({});
+    setPlotHistory({});
+    setLatestFrame(null);
+    lastFrameArrivedAtRef.current = null;
+  }
+
   useEffect(() => {
     const updateFit = () => {
       const nextFit = fitProviderRef.current.update({
@@ -250,6 +261,29 @@ export default function App() {
     return () => window.clearInterval(intervalId);
   }, [deviceInfo, latestFrame, state]);
 
+  useEffect(() => {
+    if (!connected) return;
+
+    const intervalId = window.setInterval(() => {
+      const lastFrameArrivedAt = lastFrameArrivedAtRef.current;
+      if (
+        lastFrameArrivedAt === null ||
+        performance.now() - lastFrameArrivedAt <= streamStaleMs
+      ) {
+        return;
+      }
+
+      recordingActiveRef.current = false;
+      setRecording(false);
+      clearCurrentSignal();
+      setState("disconnected");
+      setStatusDetail("EEG stream stalled; no fresh data received.");
+      void providerRef.current?.disconnect("EEG stream stalled");
+    }, 500);
+
+    return () => window.clearInterval(intervalId);
+  }, [connected]);
+
   async function connect() {
     if (replaySelected) {
       replayInputRef.current?.click();
@@ -259,11 +293,9 @@ export default function App() {
     setError("");
     sampleCountRef.current = 0;
     frameCountRef.current = 0;
-    setLatest({});
+    clearCurrentSignal();
     setSampleCount(0);
     setFrameCount(0);
-    setPlotHistory({});
-    setLatestFrame(null);
     fitProviderRef.current.reset();
     resetFitCheck();
     await providerRef.current?.connectAndStart();
@@ -275,11 +307,9 @@ export default function App() {
     setError("");
     sampleCountRef.current = 0;
     frameCountRef.current = 0;
-    setLatest({});
+    clearCurrentSignal();
     setSampleCount(0);
     setFrameCount(0);
-    setPlotHistory({});
-    setLatestFrame(null);
     fitProviderRef.current.reset();
     resetFitCheck();
     setState("connecting");
@@ -385,6 +415,7 @@ export default function App() {
   async function disconnect() {
     recordingActiveRef.current = false;
     setRecording(false);
+    clearCurrentSignal();
     await providerRef.current?.disconnect();
   }
 
