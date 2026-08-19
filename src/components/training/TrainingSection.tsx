@@ -60,8 +60,9 @@ export function TrainingSection({
   const [baselineProgress, setBaselineProgress] = useState(0);
   const [hasStartedTraining, setHasStartedTraining] = useState(false);
 
+  const eegStreaming = connectionState === "streaming" && latestFrame !== null;
   const currentScore =
-    attentionSamples.length > 0
+    eegStreaming && attentionSamples.length > 0
       ? attentionSamples[attentionSamples.length - 1].displayedScore
       : null;
   const showVideo =
@@ -71,7 +72,6 @@ export function TrainingSection({
   const isPaused = sessionState === "paused";
   const canPause = isRunning || isPaused;
   const canEnd = isRunning || isPaused;
-  const eegStreaming = connectionState === "streaming" && latestFrame !== null;
   const qualityAllowsScoring = eegStreaming && !fit.excessiveArtifact;
   const primaryAction = getPrimaryAction(phase, isRunning, isPaused);
 
