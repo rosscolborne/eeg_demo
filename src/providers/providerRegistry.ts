@@ -2,10 +2,12 @@ import type { EegProviderFactory } from "./eegProvider";
 import { BrainFlowHttpProvider } from "./brainflowHttpProvider";
 import { LocalReplayProvider } from "./localReplayProvider";
 import { MockEegProvider } from "./mockEegProvider";
+import { MuseAthenaBluetoothProvider } from "./museAthenaBluetoothProvider";
 
 export const eegProviderFactories = {
   brainflowMuseAthena: (events) =>
     new BrainFlowHttpProvider("brainflow-muse-athena", "Muse Athena", events),
+  museAthenaBluetooth: (events) => new MuseAthenaBluetoothProvider(events),
   brainflowSynthetic: (events) =>
     new BrainFlowHttpProvider("brainflow-synthetic", "BrainFlow Synthetic", events),
   localReplay: (events) => new LocalReplayProvider(events),
@@ -28,6 +30,12 @@ export const deviceCatalog: DeviceCatalogOption[] = [
     label: "Muse Athena",
     detail: "BrainFlow",
     providerKey: "brainflowMuseAthena",
+  },
+  {
+    id: "muse-athena-bluetooth",
+    label: "Muse Athena - Bluetooth",
+    detail: "Chrome Web Bluetooth",
+    providerKey: "museAthenaBluetooth",
   },
   {
     id: "brainflow-synthetic",
