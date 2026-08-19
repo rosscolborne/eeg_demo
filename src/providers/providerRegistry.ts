@@ -1,0 +1,85 @@
+import type { EegProviderFactory } from "./eegProvider";
+import { BrainFlowHttpProvider } from "./brainflowHttpProvider";
+import { LocalReplayProvider } from "./localReplayProvider";
+import { MockEegProvider } from "./mockEegProvider";
+
+export const eegProviderFactories = {
+  brainflowMuseAthena: (events) =>
+    new BrainFlowHttpProvider("brainflow-muse-athena", "Muse Athena", events),
+  brainflowSynthetic: (events) =>
+    new BrainFlowHttpProvider("brainflow-synthetic", "BrainFlow Synthetic", events),
+  localReplay: (events) => new LocalReplayProvider(events),
+  mock: (events) => new MockEegProvider(events),
+} satisfies Record<string, EegProviderFactory>;
+
+export type EegProviderKey = keyof typeof eegProviderFactories;
+
+export interface DeviceCatalogOption {
+  id: string;
+  label: string;
+  detail: string;
+  providerKey?: EegProviderKey;
+  disabled?: boolean;
+}
+
+export const deviceCatalog: DeviceCatalogOption[] = [
+  {
+    id: "brainflow-muse-athena",
+    label: "Muse Athena",
+    detail: "BrainFlow",
+    providerKey: "brainflowMuseAthena",
+  },
+  {
+    id: "brainflow-synthetic",
+    label: "BrainFlow Synthetic",
+    detail: "Simulated board",
+    providerKey: "brainflowSynthetic",
+  },
+  {
+    id: "brainflow-replay",
+    label: "Replay Recording",
+    detail: "Downloaded JSON",
+    providerKey: "localReplay",
+  },
+  {
+    id: "openbci",
+    label: "OpenBCI",
+    detail: "Coming soon",
+    disabled: true,
+  },
+  {
+    id: "brainflow",
+    label: "BrainFlow device",
+    detail: "Coming soon",
+    disabled: true,
+  },
+  {
+    id: "lsl",
+    label: "Lab Streaming Layer",
+    detail: "Coming soon",
+    disabled: true,
+  },
+];
+
+export function getConfiguredProviderKey(): EegProviderKey {
+  const configured = import.meta.env.VITE_EEG_PROVIDER;
+
+  if (configured && configured in eegProviderFactories) {
+    return configured;
+  }
+
+  return "brainflowMuseAthena";
+}
+
+export function createEegProvider(
+  key: EegProviderKey,
+  events: Parameters<EegProviderFactory>[0],
+) {
+  return eegProviderFactories[key](events);
+}
+
+export function createConfiguredEegProvider(
+  events: Parameters<EegProviderFactory>[0],
+) {
+  return createEegProvider(getConfiguredProviderKey(), events);
+}
