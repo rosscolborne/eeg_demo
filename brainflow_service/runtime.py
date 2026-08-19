@@ -9,7 +9,13 @@ from typing import AsyncIterator
 import numpy as np
 
 from .config import DEFAULT_PROCESSING, DEVICE_CONFIGS, BrainFlowDeviceConfig, ProcessingConfig
-from .dsp import build_eeg_window, config_metadata, extract_band_power_features, preprocess_eeg_window
+from .dsp import (
+    build_eeg_window,
+    config_metadata,
+    extract_band_power_features,
+    extract_brainflow_mindfulness,
+    preprocess_eeg_window,
+)
 from .models import DeviceInfo, SensorCapability, SignalChannel, SignalFeatures, SignalFrame, SignalQualityMetadata
 
 
@@ -141,8 +147,12 @@ class BrainFlowSession:
         if window is not None:
             processed = preprocess_eeg_window(window, sample_rate, self.processing)
             band_powers = extract_band_power_features(processed, sample_rate)
-            if band_powers:
-                features = SignalFeatures(band_powers=band_powers)
+            brainflow_mindfulness = extract_brainflow_mindfulness(processed, sample_rate)
+            if band_powers or brainflow_mindfulness is not None:
+                features = SignalFeatures(
+                    bandPowers=band_powers,
+                    brainflowConcentration=brainflow_mindfulness,
+                )
 
         return SignalFrame(
             sensor="eeg",

@@ -11,8 +11,10 @@ from brainflow_service.config import DEFAULT_PROCESSING, DEVICE_CONFIGS
 from brainflow_service.dsp import (
     build_eeg_window,
     extract_band_power_features,
+    extract_brainflow_mindfulness,
     preprocess_eeg_window,
 )
+from brainflow_service.models import SignalFeatures
 from brainflow_service.runtime import BrainFlowSession
 
 
@@ -74,6 +76,21 @@ def test_invalid_feature_window_returns_none() -> None:
     assert extract_band_power_features(np.array([[1.0, float("inf")]]), 256) is None
 
 
+def test_brainflow_mindfulness_extracts_bounded_score() -> None:
+    pytest.importorskip("brainflow")
+
+    score = extract_brainflow_mindfulness(sine_window(freq_hz=10, seconds=4), 256)
+
+    assert score is not None
+    assert 0 <= score <= 1
+
+
+def test_signal_features_serialize_for_frontend() -> None:
+    features = SignalFeatures(brainflowConcentration=0.42)
+
+    assert features.model_dump(by_alias=True)["brainflowConcentration"] == 0.42
+
+
 def test_brainflow_device_configs_include_live_and_synthetic() -> None:
     assert DEVICE_CONFIGS["brainflow-muse-athena"].board_id_name == "MUSE_S_ATHENA_BOARD"
     assert DEVICE_CONFIGS["brainflow-synthetic"].board_id_name == "SYNTHETIC_BOARD"
@@ -111,6 +128,8 @@ async def collect_one_frame():
                 assert frame.features.band_powers.absolute["theta"] >= 0
                 assert frame.features.band_powers.absolute["alpha"] >= 0
                 assert frame.features.band_powers.absolute["beta"] >= 0
+                assert frame.features.brainflow_concentration is not None
+                assert 0 <= frame.features.brainflow_concentration <= 1
                 return
     finally:
         session.stop()

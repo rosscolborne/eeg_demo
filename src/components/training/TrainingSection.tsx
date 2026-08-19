@@ -215,8 +215,8 @@ export function TrainingSection({
                 <Play aria-hidden="true" />
               </div>
               <div>
-                <h2>Focus Training — YouTube</h2>
-                <p>Watch a video while tracking Attention Index — Experimental.</p>
+              <h2>Focus Training — YouTube</h2>
+                <p>Watch a video while tracking a BrainFlow-derived Attention Index.</p>
               </div>
             </div>
           </div>
@@ -294,7 +294,7 @@ export function TrainingSection({
               </div>
               <div>
                 <h2>Attention Index — Experimental</h2>
-                <p>Heuristic beta activity relative to alpha and theta.</p>
+                <p>BrainFlow Mindfulness output, with diagnostic fallback if unavailable.</p>
               </div>
             </div>
             <div className="attention-score">
@@ -302,8 +302,8 @@ export function TrainingSection({
               <span>0-100</span>
             </div>
             <p className="metric-note">
-              Experimental training feedback only. This is not a validated or clinical
-              measure of focus.
+              Experimental feedback only. This is not a validated or clinical measure
+              of focus.
             </p>
           </article>
 
@@ -353,7 +353,7 @@ export function TrainingSection({
             </div>
             <div>
               <h2>Attention Index Over Time</h2>
-              <p>Smoothed baseline-relative score from reliable training frames.</p>
+              <p>Smoothed BrainFlow Mindfulness output from reliable training frames.</p>
             </div>
           </div>
           <span className="panel-meta">
@@ -427,7 +427,7 @@ function TrainingReport({ report }: { report: TrainingSessionReport }) {
               </div>
               <div>
                 <h2>Derived Metric</h2>
-                <p>Attention Index — Experimental over time.</p>
+                <p>BrainFlow-derived Attention Index over time.</p>
               </div>
             </div>
           </div>
@@ -503,7 +503,7 @@ function TrainingReport({ report }: { report: TrainingSessionReport }) {
               </div>
               <div>
                 <h2>Heuristic Ratio</h2>
-                <p>Beta divided by alpha plus theta, with baseline-relative value.</p>
+                <p>Diagnostic beta divided by alpha plus theta, with baseline-relative value.</p>
               </div>
             </div>
           </div>

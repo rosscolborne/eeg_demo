@@ -24,6 +24,7 @@ export interface AttentionMetricSample {
   rawRatio: number;
   baselineRatio: number | null;
   baselineRelativeValue: number | null;
+  scoreSource: "brainflow_mindfulness" | "diagnostic_ratio_fallback";
   sampleCount: number;
   channelCount: number;
   qualityState: HeadsetFitSnapshot["state"] | "unknown";
@@ -32,7 +33,7 @@ export interface AttentionMetricSample {
 
 export interface CalibrationProfile {
   id: string;
-  algorithmVersion: "focus-index-v1";
+  algorithmVersion: "brainflow-mindfulness-v1";
   createdAtMs: number;
   baselineRatio: number | null;
   acceptedWindows: number;
@@ -83,8 +84,7 @@ export class HeuristicAttentionProvider
     frame: SignalFrame,
     quality?: HeadsetFitSnapshot | null,
   ): AttentionMetricSample | null {
-    const reliable =
-      !quality || quality.ready || quality.state === "good";
+    const reliable = !quality?.excessiveArtifact;
     if (!reliable) {
       this.rejectWindow("poor_quality");
       return null;
@@ -114,6 +114,7 @@ export class HeuristicAttentionProvider
     const betaPower = bandResult.powers.beta ?? 0;
     const denominator = Math.max(1e-9, alphaPower + thetaPower);
     const rawRatio = betaPower / denominator;
+    const brainflowConcentration = frame.features?.brainflowConcentration;
 
     if (this.baselineRatios.length < this.baselineSampleCount) {
       this.baselineRatios.push(rawRatio);
@@ -128,7 +129,7 @@ export class HeuristicAttentionProvider
     if (this.baselineRatios.length >= this.baselineSampleCount && !this.calibrationProfile) {
       this.calibrationProfile = {
         id: crypto.randomUUID(),
-        algorithmVersion: "focus-index-v1",
+        algorithmVersion: "brainflow-mindfulness-v1",
         createdAtMs: Date.now(),
         baselineRatio,
         acceptedWindows: this.baselineRatios.length,
@@ -136,7 +137,10 @@ export class HeuristicAttentionProvider
         rejectionReasons: { ...this.rejectionReasons },
       };
     }
-    const mappedScore = mapRelativeValueToScore(baselineRelativeValue);
+    const mappedScore =
+      brainflowConcentration === null || brainflowConcentration === undefined
+        ? mapRelativeValueToScore(baselineRelativeValue)
+        : clamp(brainflowConcentration * 100, 0, 100);
     this.smoothedScore =
       this.smoothedScore === null
         ? mappedScore
@@ -154,6 +158,10 @@ export class HeuristicAttentionProvider
       rawRatio,
       baselineRatio,
       baselineRelativeValue,
+      scoreSource:
+        brainflowConcentration === null || brainflowConcentration === undefined
+          ? "diagnostic_ratio_fallback"
+          : "brainflow_mindfulness",
       sampleCount: bandResult.sampleCount,
       channelCount: bandResult.channelCount,
       qualityState: quality?.state ?? "unknown",

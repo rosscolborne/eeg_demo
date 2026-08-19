@@ -115,6 +115,47 @@ def extract_band_power_features(
     )
 
 
+def extract_brainflow_mindfulness(window: np.ndarray, sampling_rate: int) -> float | None:
+    if window.size == 0 or window.shape[1] < max(16, sampling_rate):
+        return None
+    if not np.isfinite(window).all():
+        return None
+
+    try:
+        from brainflow.data_filter import DataFilter
+        from brainflow.ml_model import (
+            BrainFlowClassifiers,
+            BrainFlowMetrics,
+            BrainFlowModelParams,
+            MLModel,
+        )
+
+        eeg_rows = list(range(window.shape[0]))
+        avg_band_powers, _ = DataFilter.get_avg_band_powers(
+            np.ascontiguousarray(window),
+            eeg_rows,
+            sampling_rate,
+            False,
+        )
+        model = MLModel(
+            BrainFlowModelParams(
+                BrainFlowMetrics.MINDFULNESS.value,
+                BrainFlowClassifiers.DEFAULT_CLASSIFIER.value,
+            ),
+        )
+        try:
+            model.prepare()
+            prediction = model.predict(avg_band_powers)
+        finally:
+            model.release()
+
+        if len(prediction) == 0 or not np.isfinite(prediction[0]):
+            return None
+        return float(np.clip(prediction[0], 0.0, 1.0))
+    except Exception:
+        return None
+
+
 def config_metadata(config: ProcessingConfig = DEFAULT_PROCESSING) -> dict[str, object]:
     return {
         "processing": asdict(config),

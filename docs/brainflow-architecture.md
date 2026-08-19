@@ -9,7 +9,7 @@ Bluetooth APIs.
 
 Pipeline:
 
-`Hardware -> BrainFlow BoardShim -> normalized EEG frame -> BrainFlow DataFilter DSP -> features -> Focus Index -> UI`
+`Hardware -> BrainFlow BoardShim -> normalized EEG frame -> BrainFlow DataFilter DSP -> BrainFlow MLModel -> Focus Index -> UI`
 
 ## Device-Agnostic Pieces
 
@@ -50,6 +50,11 @@ Pipeline:
 - `DataFilter.get_psd_welch`
 - `DataFilter.get_band_power`
 - `DataFilter.get_nearest_power_of_two`
+- `DataFilter.get_avg_band_powers`
+- `MLModel`
+- `BrainFlowModelParams`
+- `BrainFlowMetrics.MINDFULNESS`
+- `BrainFlowClassifiers.DEFAULT_CLASSIFIER`
 
 ## Recording And Replay
 
@@ -79,21 +84,24 @@ Per BrainFlow's Muse Athena documentation, the default preset exposes EEG at
 256 Hz. Auxiliary and ancillary presets expose motion and optical/battery data
 where supported.
 
-## Calibration Algorithm Preserved
+## Focus Index
 
-The current calibration is recalculated every session and is not persisted.
-It accepts only windows that pass the headset-fit gate. For each accepted window
-it computes:
+The primary Attention Index uses BrainFlow's current `MINDFULNESS` ML metric,
+scaled from `0.0-1.0` to `0-100` and smoothed in the frontend. The UI still
+labels it experimental because it is not a clinical or validated focus measure.
+
+The previous application-specific ratio remains recorded for diagnostics:
 
 `beta power / (alpha power + theta power)`
 
-The profile baseline is the median of the collected ratios. The Focus Index uses
-`current_ratio / baseline_ratio`, maps it onto a 0-100 scale, and applies temporal
-smoothing. This is preserved as `focus-index-v1`.
+Calibration is still recalculated every session and is not persisted. It records
+the diagnostic ratio baseline, but it no longer defines the displayed Attention
+Index score.
 
 Scientific concerns to investigate later:
 
-- The Focus Index is a simple heuristic, not a validated attention model.
+- BrainFlow Mindfulness is a general model, not a validated personalized attention model.
+- The diagnostic beta/(alpha+theta) ratio is still scientifically weak.
 - Current quality/contact is still inferred unless the device reports explicit
   metadata through BrainFlow.
 - The baseline has only one condition and no persistence.

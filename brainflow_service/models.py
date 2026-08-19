@@ -13,16 +13,20 @@ class SignalChannel(BaseModel):
 
 
 class BandPowerFeatures(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     absolute: dict[str, float]
     relative: dict[str, float]
     ratios: dict[str, float]
-    window_seconds: float
+    window_seconds: float = Field(alias="windowSeconds")
     method: Literal["brainflow_welch_psd"]
 
 
 class SignalFeatures(BaseModel):
-    band_powers: BandPowerFeatures | None = None
-    brainflow_concentration: float | None = None
+    model_config = ConfigDict(populate_by_name=True)
+
+    band_powers: BandPowerFeatures | None = Field(default=None, alias="bandPowers")
+    brainflow_concentration: float | None = Field(default=None, alias="brainflowConcentration")
 
 
 class SignalQualityMetadata(BaseModel):
