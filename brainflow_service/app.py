@@ -96,8 +96,8 @@ def analyze_window(request: AnalyzeWindowRequest) -> AnalyzeWindowResponse:
 
     processed = preprocess_eeg_window(window, sample_rate, DEFAULT_PROCESSING)
     band_powers = extract_band_power_features(processed, sample_rate)
-    brainflow_mindfulness = extract_brainflow_mindfulness(processed, sample_rate)
-    brainflow_restfulness = extract_brainflow_restfulness(processed, sample_rate)
+    brainflow_mindfulness = extract_brainflow_mindfulness(window, sample_rate)
+    brainflow_restfulness = extract_brainflow_restfulness(window, sample_rate)
     features = (
         SignalFeatures(
             bandPowers=band_powers,

@@ -180,7 +180,7 @@ export class TrainingSession {
 
   report(deviceInfo: DeviceInfo | null): TrainingSessionReport {
     const snapshot = this.snapshot(deviceInfo);
-    const scores = snapshot.samples.map((sample) => sample.displayedScore);
+    const scores = scoredValues(snapshot.samples);
     const eegCapability = deviceInfo?.capabilities.find(
       (capability) => capability.kind === "eeg",
     );
@@ -248,7 +248,7 @@ function summarizeStateMarkers(
     const segmentSamples = samples.filter(
       (sample) => sample.atMs >= marker.atMs && sample.atMs < endedAtMs,
     );
-    const scores = segmentSamples.map((sample) => sample.displayedScore);
+    const scores = scoredValues(segmentSamples);
 
     return {
       label: marker.label,
@@ -268,7 +268,11 @@ function pickPeriods(
   samples: AttentionMetricSample[],
   direction: "highest" | "lowest",
 ): TrainingPeriod[] {
-  return [...samples]
+  return samples
+    .filter(
+      (sample): sample is AttentionMetricSample & { displayedScore: number } =>
+        sample.displayedScore !== null,
+    )
     .sort((a, b) =>
       direction === "highest"
         ? b.displayedScore - a.displayedScore
@@ -280,6 +284,15 @@ function pickPeriods(
       atMs: sample.atMs,
       score: sample.displayedScore,
     }));
+}
+
+// Only samples where BrainFlow actually returned a mindfulness value count
+// toward these stats -- windows where it was unavailable are excluded rather
+// than counted as some substitute score.
+function scoredValues(samples: AttentionMetricSample[]): number[] {
+  return samples
+    .map((sample) => sample.displayedScore)
+    .filter((score): score is number => score !== null);
 }
 
 function average(values: number[]) {

@@ -123,6 +123,18 @@ def extract_brainflow_mental_state(
     sampling_rate: int,
     metric: str,
 ) -> float | None:
+    """Run one of BrainFlow's bundled MLModel classifiers (mindfulness/restfulness).
+
+    `window` must be the raw, unfiltered EEG window. BrainFlow's default
+    classifiers were trained on `get_avg_band_powers(..., apply_filter=True)`
+    features computed from raw data -- that method applies BrainFlow's own
+    per-band filtering internally. Passing an already bandpass/notch-filtered
+    window here (as this project's display pipeline uses) and asking
+    `get_avg_band_powers` to skip filtering produces a feature vector outside
+    the distribution the classifier expects (most notably the delta band gets
+    starved by our 3 Hz highpass), so predictions come back degenerate rather
+    than reflecting the real signal. Always call this with raw samples.
+    """
     if window.size == 0 or window.shape[1] < max(16, sampling_rate):
         return None
     if not np.isfinite(window).all():
@@ -149,7 +161,7 @@ def extract_brainflow_mental_state(
             np.ascontiguousarray(window),
             eeg_rows,
             sampling_rate,
-            False,
+            True,
         )
         model = MLModel(
             BrainFlowModelParams(
@@ -164,10 +176,15 @@ def extract_brainflow_mental_state(
             model.release()
 
         if len(prediction) == 0 or not np.isfinite(prediction[0]):
+            logger.warning(
+                "BrainFlow %s metric returned no usable prediction (raw=%s)",
+                metric,
+                prediction,
+            )
             return None
         return float(np.clip(prediction[0], 0.0, 1.0))
-    except Exception as exc:
-        logger.warning("BrainFlow %s metric extraction failed: %s", metric, exc)
+    except Exception:
+        logger.exception("BrainFlow %s metric extraction failed", metric)
         return None
 
 

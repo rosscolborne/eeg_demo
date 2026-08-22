@@ -353,14 +353,18 @@ export function TrainingSection({
               </div>
               <InfoPopoverButton ariaLabel="Explain brain metrics" preferredSide="left">
                 <p>
-                  Mindfulness starts from BrainFlow's MLModel Mindfulness output,
-                  then uses the session baseline and smoothing only if calibration
-                  was run before training.
+                  Mindfulness uses BrainFlow's MLModel Mindfulness output, then
+                  applies the session baseline and smoothing only if calibration
+                  was run before training. If BrainFlow does not provide that
+                  metric, the value stays blank -- it is never replaced with a
+                  band-ratio estimate.
                 </p>
                 <p>
-                  Restfulness uses BrainFlow's MLModel Restfulness output when
-                  available. If BrainFlow does not provide that metric, the
-                  value stays blank.
+                  Restfulness uses BrainFlow's MLModel Restfulness output, then
+                  applies the session baseline and smoothing only if calibration
+                  was run before training -- the same treatment as Mindfulness.
+                  If BrainFlow does not provide that metric, the value stays
+                  blank -- it is never replaced with an estimate.
                 </p>
                 <p>
                   Focus starts from a beta/theta band-power ratio. Relax starts

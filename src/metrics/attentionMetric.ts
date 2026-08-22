@@ -23,7 +23,7 @@ export interface AttentionMetricSample {
   metricId: "attention-index-experimental";
   label: "BrainFlow Mindfulness";
   atMs: number;
-  displayedScore: number;
+  displayedScore: number | null;
   restfulnessScore: number | null;
   focusScore: number;
   relaxScore: number;
@@ -36,7 +36,12 @@ export interface AttentionMetricSample {
   baselineBrainflowMindfulness: number | null;
   baselineRelativeValue: number | null;
   baselineZScore: number | null;
-  scoreSource: "brainflow_mindfulness" | "diagnostic_ratio_fallback";
+  rawBrainflowRestfulness: number | null;
+  baselineBrainflowRestfulness: number | null;
+  restfulnessBaselineRelativeValue: number | null;
+  restfulnessBaselineZScore: number | null;
+  scoreSource: "brainflow_mindfulness" | "unavailable";
+  restfulnessScoreSource: "brainflow_restfulness" | "unavailable";
   sampleCount: number;
   channelCount: number;
   qualityState: HeadsetFitSnapshot["state"] | "unknown";
@@ -51,6 +56,8 @@ export interface CalibrationProfile {
   baselineBrainflowMindfulness: number | null;
   baselineRatioSpread: number | null;
   baselineBrainflowMindfulnessSpread: number | null;
+  baselineBrainflowRestfulness: number | null;
+  baselineBrainflowRestfulnessSpread: number | null;
   acceptedWindows: number;
   rejectedWindows: number;
   rejectionReasons: Record<string, number>;
@@ -77,6 +84,7 @@ export class HeuristicAttentionProvider
   private readonly smoothingAlpha;
   private baselineRatios: number[] = [];
   private baselineBrainflowMindfulnessValues: number[] = [];
+  private baselineBrainflowRestfulnessValues: number[] = [];
   private baselineFocusValues: number[] = [];
   private baselineRelaxValues: number[] = [];
   private smoothedScore: number | null = null;
@@ -97,6 +105,7 @@ export class HeuristicAttentionProvider
   reset(options: { useBaselineRelativeDisplay?: boolean } = {}) {
     this.baselineRatios = [];
     this.baselineBrainflowMindfulnessValues = [];
+    this.baselineBrainflowRestfulnessValues = [];
     this.baselineFocusValues = [];
     this.baselineRelaxValues = [];
     this.smoothedScore = null;
@@ -171,6 +180,13 @@ export class HeuristicAttentionProvider
     ) {
       this.baselineBrainflowMindfulnessValues.push(brainflowConcentration);
     }
+    if (
+      brainflowRestfulness !== null &&
+      brainflowRestfulness !== undefined &&
+      this.baselineBrainflowRestfulnessValues.length < this.baselineSampleCount
+    ) {
+      this.baselineBrainflowRestfulnessValues.push(brainflowRestfulness);
+    }
     if (this.baselineFocusValues.length < this.baselineSampleCount) {
       this.baselineFocusValues.push(neurofeedbackScores.focusSigned);
     }
@@ -186,12 +202,15 @@ export class HeuristicAttentionProvider
       this.baselineBrainflowMindfulnessValues.length > 0
         ? median(this.baselineBrainflowMindfulnessValues)
         : null;
+    const baselineBrainflowRestfulness =
+      this.baselineBrainflowRestfulnessValues.length > 0
+        ? median(this.baselineBrainflowRestfulnessValues)
+        : null;
     const ratioStats = robustStats(this.baselineRatios);
     const brainflowStats = robustStats(this.baselineBrainflowMindfulnessValues);
+    const brainflowRestfulnessStats = robustStats(this.baselineBrainflowRestfulnessValues);
     const focusStats = robustStats(this.baselineFocusValues);
     const relaxStats = robustStats(this.baselineRelaxValues);
-    const ratioRelativeValue =
-      baselineRatio && baselineRatio > 0 ? rawRatio / baselineRatio : null;
     const brainflowRelativeValue =
       brainflowConcentration !== null &&
       brainflowConcentration !== undefined &&
@@ -199,10 +218,23 @@ export class HeuristicAttentionProvider
       baselineBrainflowMindfulness > 0
         ? brainflowConcentration / baselineBrainflowMindfulness
         : null;
-    const ratioZScore = ratioStats ? (rawRatio - ratioStats.median) / ratioStats.spread : null;
     const brainflowZScore =
       brainflowConcentration !== null && brainflowConcentration !== undefined && brainflowStats
         ? (brainflowConcentration - brainflowStats.median) / brainflowStats.spread
+        : null;
+    const brainflowRestfulnessRelativeValue =
+      brainflowRestfulness !== null &&
+      brainflowRestfulness !== undefined &&
+      baselineBrainflowRestfulness &&
+      baselineBrainflowRestfulness > 0
+        ? brainflowRestfulness / baselineBrainflowRestfulness
+        : null;
+    const brainflowRestfulnessZScore =
+      brainflowRestfulness !== null &&
+      brainflowRestfulness !== undefined &&
+      brainflowRestfulnessStats
+        ? (brainflowRestfulness - brainflowRestfulnessStats.median) /
+          brainflowRestfulnessStats.spread
         : null;
     const focusZScore = focusStats
       ? (neurofeedbackScores.focusSigned - focusStats.median) / focusStats.spread
@@ -212,11 +244,10 @@ export class HeuristicAttentionProvider
       : null;
     const mappedFocusScore = mapZScoreToScore(focusZScore);
     const mappedRelaxScore = mapZScoreToScore(relaxZScore);
-    const useBrainflowScore =
-      brainflowZScore !== null && this.baselineBrainflowMindfulnessValues.length >= this.baselineSampleCount;
-    const baselineRelativeValue =
-      brainflowRelativeValue ?? ratioRelativeValue;
-    const baselineZScore = useBrainflowScore ? brainflowZScore : ratioZScore;
+    const baselineRelativeValue = brainflowRelativeValue;
+    const baselineZScore = brainflowZScore;
+    const restfulnessBaselineRelativeValue = brainflowRestfulnessRelativeValue;
+    const restfulnessBaselineZScore = brainflowRestfulnessZScore;
     if (this.baselineRatios.length >= this.baselineSampleCount && !this.calibrationProfile) {
       this.calibrationProfile = {
         id: crypto.randomUUID(),
@@ -226,30 +257,44 @@ export class HeuristicAttentionProvider
         baselineBrainflowMindfulness,
         baselineRatioSpread: ratioStats?.spread ?? null,
         baselineBrainflowMindfulnessSpread: brainflowStats?.spread ?? null,
+        baselineBrainflowRestfulness,
+        baselineBrainflowRestfulnessSpread: brainflowRestfulnessStats?.spread ?? null,
         acceptedWindows: this.baselineRatios.length,
         rejectedWindows: this.rejectedWindows,
         rejectionReasons: { ...this.rejectionReasons },
       };
     }
     const mappedScore = mapZScoreToScore(baselineZScore);
+    const mappedRestfulnessScore = mapZScoreToScore(restfulnessBaselineZScore);
+    // BrainFlow did not (yet) provide a mindfulness/restfulness reading for
+    // this window -- report that honestly rather than substituting an
+    // estimate derived from something else.
     const directMindfulnessScore =
       brainflowConcentration !== null && brainflowConcentration !== undefined
         ? clamp(brainflowConcentration * 100, 0, 100)
-        : mapRatioToScore(rawRatio);
+        : null;
+    const directRestfulnessScore =
+      brainflowRestfulness !== null && brainflowRestfulness !== undefined
+        ? clamp(brainflowRestfulness * 100, 0, 100)
+        : null;
     const displayScore = this.useBaselineRelativeDisplay ? mappedScore : directMindfulnessScore;
+    const restfulnessDisplayScore = this.useBaselineRelativeDisplay
+      ? mappedRestfulnessScore
+      : directRestfulnessScore;
     if (displayScore === null) {
       this.rejectWindow("missing_metric");
-      return null;
     }
 
     this.smoothedScore =
-      smoothScore(this.smoothedScore, displayScore, this.smoothingAlpha);
+      displayScore === null
+        ? null
+        : smoothScore(this.smoothedScore, displayScore, this.smoothingAlpha);
     this.smoothedRestfulnessScore =
-      brainflowRestfulness === null || brainflowRestfulness === undefined
+      restfulnessDisplayScore === null
         ? null
         : smoothScore(
             this.smoothedRestfulnessScore,
-            clamp(brainflowRestfulness * 100, 0, 100),
+            restfulnessDisplayScore,
             this.smoothingAlpha,
           );
     this.smoothedFocusScore = smoothScore(
@@ -271,10 +316,9 @@ export class HeuristicAttentionProvider
       metricId: "attention-index-experimental",
       label: "BrainFlow Mindfulness",
       atMs: frame.receivedAtMs,
-      displayedScore: Math.round(clamp(this.smoothedScore, 0, 100)),
+      displayedScore:
+        this.smoothedScore === null ? null : Math.round(clamp(this.smoothedScore, 0, 100)),
       restfulnessScore:
-        brainflowRestfulness === null ||
-        brainflowRestfulness === undefined ||
         this.smoothedRestfulnessScore === null
           ? null
           : Math.round(clamp(this.smoothedRestfulnessScore, 0, 100)),
@@ -289,10 +333,18 @@ export class HeuristicAttentionProvider
       baselineBrainflowMindfulness,
       baselineRelativeValue,
       baselineZScore,
+      rawBrainflowRestfulness: brainflowRestfulness ?? null,
+      baselineBrainflowRestfulness,
+      restfulnessBaselineRelativeValue,
+      restfulnessBaselineZScore,
       scoreSource:
-        !useBrainflowScore
-          ? "diagnostic_ratio_fallback"
-          : "brainflow_mindfulness",
+        brainflowConcentration !== null && brainflowConcentration !== undefined
+          ? "brainflow_mindfulness"
+          : "unavailable",
+      restfulnessScoreSource:
+        brainflowRestfulness !== null && brainflowRestfulness !== undefined
+          ? "brainflow_restfulness"
+          : "unavailable",
       sampleCount: bandResult.sampleCount,
       channelCount: bandResult.channelCount,
       qualityState: quality?.state ?? "unknown",
@@ -314,12 +366,6 @@ function mapZScoreToScore(value: number | null): number | null {
   if (value === null || !Number.isFinite(value)) return null;
 
   return 50 + Math.tanh(value / calibratedZScoreScale) * 45;
-}
-
-function mapRatioToScore(value: number) {
-  if (!Number.isFinite(value) || value <= 0) return null;
-
-  return clamp(Math.tanh(Math.log(value) * 1.1) * 50 + 50, 0, 100);
 }
 
 function readBrainflowMetric(frame: SignalFrame, keys: string[]) {
