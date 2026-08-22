@@ -1,16 +1,21 @@
 import type { SignalFrame } from "../domain/eeg";
 import {
+  frontalChannels,
+  groupedPowers,
+  resolveBandPowers,
+  temporalChannels,
+} from "./bandPowerChannels";
+import { baselineSampleCount, vrchatStyleEmaDecay } from "./metricConfig";
+import {
   computeBrainflowsNeurofeedbackScores,
   smoothScore,
 } from "./neurofeedbackRatios";
 import {
-  computeBandPowers,
   defaultAttentionBands,
   type FrequencyBand,
 } from "../signalProcessing/bandPower";
 import type { HeadsetFitSnapshot } from "../signalQuality/headsetFitProvider";
 
-const vrchatStyleEmaDecay = 0.05;
 const calibratedZScoreScale = 1.5;
 export interface MetricProvider<TSample> {
   readonly id: string;
@@ -84,13 +89,13 @@ export class HeuristicAttentionProvider
   private smoothedFocusScore: number | null = null;
   private smoothedRelaxScore: number | null = null;
   private calibrationProfile: CalibrationProfile | null = null;
-  private useBaselineRelativeDisplay = false;
+  private useBaselineRelativeDisplay = true;
   private rejectedWindows = 0;
   private rejectionReasons: Record<string, number> = {};
 
   constructor(options: HeuristicAttentionProviderOptions = {}) {
     this.bands = options.bands ?? defaultAttentionBands;
-    this.baselineSampleCount = options.baselineSampleCount ?? 24;
+    this.baselineSampleCount = options.baselineSampleCount ?? baselineSampleCount;
     this.smoothingAlpha = options.smoothingAlpha ?? vrchatStyleEmaDecay;
   }
 
@@ -104,7 +109,7 @@ export class HeuristicAttentionProvider
     this.smoothedFocusScore = null;
     this.smoothedRelaxScore = null;
     this.calibrationProfile = null;
-    this.useBaselineRelativeDisplay = options.useBaselineRelativeDisplay ?? false;
+    this.useBaselineRelativeDisplay = options.useBaselineRelativeDisplay ?? true;
     this.rejectedWindows = 0;
     this.rejectionReasons = {};
   }
@@ -123,32 +128,41 @@ export class HeuristicAttentionProvider
       return null;
     }
 
-    const brainFlowBands = frame.features?.bandPowers?.absolute;
-    const bandResult = brainFlowBands
-      ? {
-          channelCount: frame.channels.length,
-          sampleCount: frame.samples.length,
-          sampleRateHz: frame.sampleRateHz ?? 0,
-          powers: brainFlowBands,
-        }
-      : computeBandPowers(frame, [
-          this.bands.theta,
-          this.bands.alpha,
-          this.bands.beta,
-        ]);
+    const resolved = resolveBandPowers(
+      frame,
+      [this.bands.theta, this.bands.alpha, this.bands.beta],
+      quality,
+    );
 
-    if (!bandResult) {
+    if (!resolved) {
       this.rejectWindow("insufficient_window");
       return null;
     }
 
-    const thetaPower = bandResult.powers.theta ?? 0;
-    const alphaPower = bandResult.powers.alpha ?? 0;
-    const betaPower = bandResult.powers.beta ?? 0;
-    const neurofeedbackScores = computeBrainflowsNeurofeedbackScores({
-      thetaPower,
-      alphaPower,
-      betaPower,
+    const thetaPower = resolved.powers.theta ?? 0;
+    const alphaPower = resolved.powers.alpha ?? 0;
+    const betaPower = resolved.powers.beta ?? 0;
+    const frontal = groupedPowers(
+      resolved.perChannel,
+      frontalChannels,
+      resolved.powers,
+      resolved.usableChannelKeys,
+    );
+    const temporal = groupedPowers(
+      resolved.perChannel,
+      temporalChannels,
+      resolved.powers,
+      resolved.usableChannelKeys,
+    );
+    const focusScores = computeBrainflowsNeurofeedbackScores({
+      thetaPower: frontal.theta || thetaPower,
+      alphaPower: frontal.alpha || alphaPower,
+      betaPower: frontal.beta || betaPower,
+    });
+    const relaxScores = computeBrainflowsNeurofeedbackScores({
+      thetaPower: temporal.theta || thetaPower,
+      alphaPower: temporal.alpha || alphaPower,
+      betaPower: temporal.beta || betaPower,
     });
     const denominator = Math.max(1e-9, alphaPower + thetaPower);
     const rawRatio = betaPower / denominator;
@@ -172,10 +186,10 @@ export class HeuristicAttentionProvider
       this.baselineBrainflowMindfulnessValues.push(brainflowConcentration);
     }
     if (this.baselineFocusValues.length < this.baselineSampleCount) {
-      this.baselineFocusValues.push(neurofeedbackScores.focusSigned);
+      this.baselineFocusValues.push(focusScores.focusSigned);
     }
     if (this.baselineRelaxValues.length < this.baselineSampleCount) {
-      this.baselineRelaxValues.push(neurofeedbackScores.relaxSigned);
+      this.baselineRelaxValues.push(relaxScores.relaxSigned);
     }
 
     const baselineRatio =
@@ -205,10 +219,10 @@ export class HeuristicAttentionProvider
         ? (brainflowConcentration - brainflowStats.median) / brainflowStats.spread
         : null;
     const focusZScore = focusStats
-      ? (neurofeedbackScores.focusSigned - focusStats.median) / focusStats.spread
+      ? (focusScores.focusSigned - focusStats.median) / focusStats.spread
       : null;
     const relaxZScore = relaxStats
-      ? (neurofeedbackScores.relaxSigned - relaxStats.median) / relaxStats.spread
+      ? (relaxScores.relaxSigned - relaxStats.median) / relaxStats.spread
       : null;
     const mappedFocusScore = mapZScoreToScore(focusZScore);
     const mappedRelaxScore = mapZScoreToScore(relaxZScore);
@@ -255,15 +269,15 @@ export class HeuristicAttentionProvider
     this.smoothedFocusScore = smoothScore(
       this.smoothedFocusScore,
       this.useBaselineRelativeDisplay
-        ? mappedFocusScore ?? neurofeedbackScores.focusScore
-        : neurofeedbackScores.focusScore,
+        ? mappedFocusScore ?? focusScores.focusScore
+        : focusScores.focusScore,
       this.smoothingAlpha,
     );
     this.smoothedRelaxScore = smoothScore(
       this.smoothedRelaxScore,
       this.useBaselineRelativeDisplay
-        ? mappedRelaxScore ?? neurofeedbackScores.relaxScore
-        : neurofeedbackScores.relaxScore,
+        ? mappedRelaxScore ?? relaxScores.relaxScore
+        : relaxScores.relaxScore,
       this.smoothingAlpha,
     );
 
@@ -293,8 +307,8 @@ export class HeuristicAttentionProvider
         !useBrainflowScore
           ? "diagnostic_ratio_fallback"
           : "brainflow_mindfulness",
-      sampleCount: bandResult.sampleCount,
-      channelCount: bandResult.channelCount,
+      sampleCount: resolved.sampleCount,
+      channelCount: resolved.channelCount,
       qualityState: quality?.state ?? "unknown",
       reliable,
     };

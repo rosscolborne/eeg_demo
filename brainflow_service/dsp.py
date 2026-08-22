@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import logging
+import threading
 
 import numpy as np
 
@@ -9,6 +10,8 @@ from .config import DEFAULT_BANDS, DEFAULT_PROCESSING, FrequencyBand, Processing
 from .models import BandPowerFeatures
 
 logger = logging.getLogger(__name__)
+_ml_models: dict[str, object] = {}
+_ml_lock = threading.Lock()
 
 
 def build_eeg_window(data: np.ndarray, eeg_channels: list[int], samples: int) -> np.ndarray | None:
@@ -62,11 +65,15 @@ def extract_band_power_features(
     window: np.ndarray,
     sampling_rate: int,
     bands: tuple[FrequencyBand, ...] = DEFAULT_BANDS,
+    channel_ids: list[str] | None = None,
 ) -> BandPowerFeatures | None:
     if window.size == 0 or window.shape[1] < max(16, sampling_rate):
         return None
     if not np.isfinite(window).all():
         return None
+
+    ids = resolve_channel_ids(window.shape[0], channel_ids)
+    per_channel: dict[str, dict[str, float]] = {}
 
     try:
         from brainflow.data_filter import DataFilter, WindowOperations
@@ -74,10 +81,8 @@ def extract_band_power_features(
         nfft = DataFilter.get_nearest_power_of_two(window.shape[1])
         if nfft >= window.shape[1]:
             nfft = max(16, nfft // 2)
-        absolute: dict[str, float] = {}
-        per_channel: dict[str, list[float]] = {band.id: [] for band in bands}
 
-        for channel in window:
+        for channel_index, channel in enumerate(window):
             psd = DataFilter.get_psd_welch(
                 np.ascontiguousarray(channel),
                 nfft,
@@ -85,34 +90,29 @@ def extract_band_power_features(
                 sampling_rate,
                 WindowOperations.HANNING.value,
             )
-            for band in bands:
-                power = DataFilter.get_band_power(psd, band.low_hz, band.high_hz)
-                per_channel[band.id].append(float(power))
-
-        for band in bands:
-            values = per_channel[band.id]
-            absolute[band.id] = float(np.mean(values)) if values else 0.0
+            per_channel[ids[channel_index]] = {
+                band.id: float(DataFilter.get_band_power(psd, band.low_hz, band.high_hz))
+                for band in bands
+            }
     except Exception:
-        absolute = fallback_band_powers(window, sampling_rate, bands)
+        per_channel = fallback_band_powers(window, sampling_rate, bands, ids)
 
-    total = sum(max(0.0, value) for value in absolute.values())
-    relative = {
-        key: (max(0.0, value) / total if total > 0 else 0.0)
-        for key, value in absolute.items()
-    }
-    theta = absolute.get("theta", 0.0)
-    alpha = absolute.get("alpha", 0.0)
-    beta = absolute.get("beta", 0.0)
+    absolute = mean_band_powers(per_channel, bands)
+    relative = relative_band_powers(absolute)
+    theta = relative.get("theta", 0.0)
+    alpha = relative.get("alpha", 0.0)
+    beta = relative.get("beta", 0.0)
 
     return BandPowerFeatures(
         absolute=absolute,
         relative=relative,
         ratios={
-            "alphaTheta": safe_ratio(alpha, theta),
-            "betaTheta": safe_ratio(beta, theta),
-            "thetaBeta": safe_ratio(theta, beta),
-            "betaOverAlphaTheta": safe_ratio(beta, alpha + theta),
+            "alphaTheta": log_ratio(alpha, theta),
+            "betaTheta": log_ratio(beta, theta),
+            "thetaBeta": log_ratio(theta, beta),
+            "betaOverAlphaTheta": log_ratio(beta, alpha + theta),
         },
+        per_channel=per_channel,
         window_seconds=window.shape[1] / sampling_rate,
         method="brainflow_welch_psd",
     )
@@ -151,17 +151,18 @@ def extract_brainflow_mental_state(
             sampling_rate,
             False,
         )
-        model = MLModel(
-            BrainFlowModelParams(
-                metric_id,
-                BrainFlowClassifiers.DEFAULT_CLASSIFIER.value,
-            ),
-        )
-        try:
-            model.prepare()
+        with _ml_lock:
+            model = _ml_models.get(metric)
+            if model is None:
+                model = MLModel(
+                    BrainFlowModelParams(
+                        metric_id,
+                        BrainFlowClassifiers.DEFAULT_CLASSIFIER.value,
+                    ),
+                )
+                model.prepare()
+                _ml_models[metric] = model
             prediction = model.predict(avg_band_powers)
-        finally:
-            model.release()
 
         if len(prediction) == 0 or not np.isfinite(prediction[0]):
             return None
@@ -190,15 +191,52 @@ def safe_ratio(numerator: float, denominator: float) -> float:
     return float(numerator / max(1e-9, denominator))
 
 
+def log_ratio(numerator: float, denominator: float) -> float:
+    return float(np.log(max(1e-9, numerator) / max(1e-9, denominator)))
+
+
+def resolve_channel_ids(channel_count: int, channel_ids: list[str] | None) -> list[str]:
+    if channel_ids and len(channel_ids) == channel_count:
+        return [
+            (channel_id.strip().lower() or f"ch{index}")
+            for index, channel_id in enumerate(channel_ids)
+        ]
+    return [f"ch{index}" for index in range(channel_count)]
+
+
+def mean_band_powers(
+    per_channel: dict[str, dict[str, float]],
+    bands: tuple[FrequencyBand, ...],
+) -> dict[str, float]:
+    absolute: dict[str, float] = {}
+    for band in bands:
+        values = [max(0.0, channel.get(band.id, 0.0)) for channel in per_channel.values()]
+        absolute[band.id] = float(np.mean(values)) if values else 0.0
+    return absolute
+
+
+def relative_band_powers(absolute: dict[str, float]) -> dict[str, float]:
+    total = sum(max(0.0, value) for value in absolute.values())
+    return {
+        key: (max(0.0, value) / total if total > 0 else 0.0)
+        for key, value in absolute.items()
+    }
+
+
 def fallback_band_powers(
     window: np.ndarray,
     sampling_rate: int,
     bands: tuple[FrequencyBand, ...],
-) -> dict[str, float]:
+    channel_ids: list[str],
+) -> dict[str, dict[str, float]]:
     freqs = np.fft.rfftfreq(window.shape[1], d=1.0 / sampling_rate)
     spectrum = np.abs(np.fft.rfft(window - window.mean(axis=1, keepdims=True), axis=1)) ** 2
-    powers: dict[str, float] = {}
-    for band in bands:
-        mask = (freqs >= band.low_hz) & (freqs <= band.high_hz)
-        powers[band.id] = float(np.mean(spectrum[:, mask])) if mask.any() else 0.0
-    return powers
+    per_channel: dict[str, dict[str, float]] = {}
+    for channel_index, channel_id in enumerate(channel_ids):
+        per_channel[channel_id] = {}
+        for band in bands:
+            mask = (freqs >= band.low_hz) & (freqs <= band.high_hz)
+            per_channel[channel_id][band.id] = (
+                float(np.mean(spectrum[channel_index, mask])) if mask.any() else 0.0
+            )
+    return per_channel

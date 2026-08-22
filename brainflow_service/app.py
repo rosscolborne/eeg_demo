@@ -41,6 +41,7 @@ class AnalyzeWindowRequest(BaseModel):
 
     sample_rate_hz: float = Field(alias="sampleRateHz")
     samples: list[list[float]]
+    channel_ids: list[str] | None = Field(default=None, alias="channelIds")
 
 
 class AnalyzeWindowResponse(BaseModel):
@@ -95,7 +96,11 @@ def analyze_window(request: AnalyzeWindowRequest) -> AnalyzeWindowResponse:
         raise HTTPException(status_code=400, detail="samples contain non-finite values.")
 
     processed = preprocess_eeg_window(window, sample_rate, DEFAULT_PROCESSING)
-    band_powers = extract_band_power_features(processed, sample_rate)
+    band_powers = extract_band_power_features(
+        processed,
+        sample_rate,
+        channel_ids=request.channel_ids,
+    )
     brainflow_mindfulness = extract_brainflow_mindfulness(processed, sample_rate)
     brainflow_restfulness = extract_brainflow_restfulness(processed, sample_rate)
     features = (

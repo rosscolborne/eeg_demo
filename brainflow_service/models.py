@@ -18,6 +18,7 @@ class BandPowerFeatures(BaseModel):
     absolute: dict[str, float]
     relative: dict[str, float]
     ratios: dict[str, float]
+    per_channel: dict[str, dict[str, float]] = Field(default_factory=dict, alias="perChannel")
     window_seconds: float = Field(alias="windowSeconds")
     method: Literal["brainflow_welch_psd"]
 

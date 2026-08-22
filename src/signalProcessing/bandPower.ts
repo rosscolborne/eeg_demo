@@ -12,6 +12,7 @@ export interface BandPowerResult {
   sampleCount: number;
   sampleRateHz: number;
   powers: Record<string, number>;
+  perChannel: Record<string, Record<string, number>>;
 }
 
 export const defaultAttentionBands = {
@@ -42,12 +43,24 @@ export function computeBandPowers(
     }
   }
 
+  const perChannel: Record<string, Record<string, number>> = {};
   const powers: Record<string, number> = {};
-  for (const band of bands) {
-    const channelPowers = channelSamples
-      .filter((samples) => samples.length >= 16)
-      .map((samples) => bandPower(samples, frame.sampleRateHz ?? 256, band));
+  for (let channelIndex = 0; channelIndex < channelSamples.length; channelIndex += 1) {
+    const samples = channelSamples[channelIndex];
+    if (samples.length < 16) continue;
+    const channelId = frame.channels[channelIndex]?.id ?? `ch${channelIndex}`;
+    perChannel[channelId] = {};
+    for (const band of bands) {
+      perChannel[channelId][band.id] = bandPower(
+        samples,
+        frame.sampleRateHz ?? 256,
+        band,
+      );
+    }
+  }
 
+  for (const band of bands) {
+    const channelPowers = Object.values(perChannel).map((values) => values[band.id] ?? 0);
     powers[band.id] =
       channelPowers.reduce((total, power) => total + power, 0) /
       Math.max(1, channelPowers.length);
@@ -58,6 +71,7 @@ export function computeBandPowers(
     sampleCount: frame.samples.length,
     sampleRateHz: frame.sampleRateHz,
     powers,
+    perChannel,
   };
 }
 

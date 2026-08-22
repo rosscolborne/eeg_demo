@@ -20,6 +20,7 @@ import {
   type TrainingSessionReport,
   type TrainingSessionState,
 } from "../../training/trainingSession";
+import { baselineSampleCount } from "../../metrics/metricConfig";
 import type { HeadsetFitSnapshot } from "../../signalQuality/headsetFitProvider";
 import { InfoPopoverButton } from "../InfoPopoverButton";
 import { SeriesChart } from "./SeriesChart";
@@ -39,7 +40,7 @@ interface TrainingSectionProps {
 }
 
 const defaultVideoUrl = "https://www.youtube.com/watch?v=uyb0wW0ln_g";
-const baselineSamplesRequired = 24;
+const baselineSamplesRequired = baselineSampleCount;
 const defaultVideoId = getYoutubeVideoId(defaultVideoUrl);
 type TrainingPhase =
   | "idle"
@@ -188,7 +189,7 @@ export function TrainingSection({
 
   function beginTraining() {
     if (phase !== "calibrated") {
-      metricProviderRef.current.reset({ useBaselineRelativeDisplay: false });
+      metricProviderRef.current.reset({ useBaselineRelativeDisplay: true });
       sessionRef.current = new TrainingSession();
     } else {
       metricProviderRef.current.setBaselineRelativeDisplay(true);

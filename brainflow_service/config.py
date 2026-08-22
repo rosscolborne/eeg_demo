@@ -13,19 +13,18 @@ class FrequencyBand:
 
 @dataclass(frozen=True)
 class ProcessingConfig:
-    window_seconds: float = 2.0
+    window_seconds: float = 4.0
     update_interval_seconds: float = 0.25
     notch_low_hz: float = 58.0
     notch_high_hz: float = 62.0
     bandpass_low_hz: float = 3.0
     bandpass_high_hz: float = 45.0
     filter_order: int = 4
-    baseline_windows_required: int = 24
+    baseline_windows_required: int = 120
     smoothing_alpha: float = 0.22
 
 
 DEFAULT_BANDS = (
-    FrequencyBand("delta", "Delta", 1.0, 4.0),
     FrequencyBand("theta", "Theta", 4.0, 8.0),
     FrequencyBand("alpha", "Alpha", 8.0, 13.0),
     FrequencyBand("beta", "Beta", 13.0, 30.0),

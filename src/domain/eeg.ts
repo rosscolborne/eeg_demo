@@ -40,6 +40,7 @@ export interface BandPowerFeatures {
   absolute: Record<string, number>;
   relative: Record<string, number>;
   ratios: Record<string, number>;
+  perChannel?: Record<string, Record<string, number>>;
   windowSeconds: number;
   method: "brainflow_welch_psd" | "custom_goertzel";
 }

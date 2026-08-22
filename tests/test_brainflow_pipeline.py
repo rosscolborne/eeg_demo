@@ -65,6 +65,8 @@ def test_band_power_extracts_expected_bands() -> None:
     assert features.absolute["alpha"] > features.absolute["theta"]
     assert features.absolute["alpha"] > features.absolute["beta"]
     assert "betaOverAlphaTheta" in features.ratios
+    assert len(features.per_channel) == 4
+    assert "alpha" in next(iter(features.per_channel.values()))
 
 
 def test_band_power_handles_exact_power_of_two_window() -> None:

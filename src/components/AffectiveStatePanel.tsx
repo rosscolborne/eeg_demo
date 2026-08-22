@@ -46,9 +46,11 @@ export function AffectiveStatePanel({
             BrainFlow emotion predictions and not validated emotion labels.
           </p>
           <p>
-            Arousal rises when beta plus gamma power is high relative to alpha
-            plus theta. Valence rises when alpha power is high relative to theta
-            plus beta. Both axes are smoothed with a slow EMA.
+            Arousal rises when beta power is high relative to alpha
+            plus theta. Valence rises when right-frontal alpha is high
+            relative to left-frontal alpha (AF8 vs AF7), falling back to
+            alpha over theta plus beta when those channels are missing.
+            Both axes are smoothed with a slow EMA.
           </p>
           <p>
             The state label is the nearest named region on the two-axis chart,

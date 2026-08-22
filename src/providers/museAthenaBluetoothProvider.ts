@@ -13,11 +13,11 @@ import type {
   SignalFeatures,
   SignalFrame,
 } from "../domain/eeg";
+import { analysisWindowSeconds } from "../metrics/metricConfig";
 import type { EegProvider, EegProviderDescriptor } from "./eegProvider";
 
 const defaultBrainFlowServiceUrl =
   import.meta.env.VITE_BRAINFLOW_SERVICE_URL ?? "http://127.0.0.1:8000";
-const analysisWindowSeconds = 2;
 
 export class MuseAthenaBluetoothProvider implements EegProvider {
   readonly descriptor: EegProviderDescriptor = {
@@ -131,7 +131,11 @@ export class MuseAthenaBluetoothProvider implements EegProvider {
 
     this.analysisInFlight = true;
     const windowSamples = [...this.analysisBuffer];
-    const features = await this.analyzeWindow(windowSamples, sampleRate);
+    const features = await this.analyzeWindow(
+      windowSamples,
+      sampleRate,
+      eeg.channelNames.map((name) => name.toLowerCase()),
+    );
     this.analysisInFlight = false;
 
     const normalized: SignalFrame = {
@@ -151,7 +155,7 @@ export class MuseAthenaBluetoothProvider implements EegProvider {
         excessiveArtifact: false,
         message: "Quality inferred from Web Bluetooth EEG stream",
       },
-      features,
+      features: features ?? { bandPowers: null },
     };
 
     if (normalized.sequenceId <= 10 || normalized.sequenceId % 100 === 0) {
@@ -163,12 +167,13 @@ export class MuseAthenaBluetoothProvider implements EegProvider {
   private async analyzeWindow(
     samples: number[][],
     sampleRateHz: number,
+    channelIds: string[],
   ): Promise<SignalFeatures | null> {
     try {
       const response = await fetch(`${this.brainFlowServiceUrl}/analyze-window`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sampleRateHz, samples }),
+        body: JSON.stringify({ sampleRateHz, samples, channelIds }),
       });
       if (!response.ok) {
         throw new Error(await response.text());

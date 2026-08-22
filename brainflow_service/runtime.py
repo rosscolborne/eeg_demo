@@ -147,7 +147,12 @@ class BrainFlowSession:
         features = None
         if window is not None:
             processed = preprocess_eeg_window(window, sample_rate, self.processing)
-            band_powers = extract_band_power_features(processed, sample_rate)
+            channel_ids = [channel.id for channel in self.device_info.capabilities[0].channels]
+            band_powers = extract_band_power_features(
+                processed,
+                sample_rate,
+                channel_ids=channel_ids,
+            )
             brainflow_mindfulness = extract_brainflow_mindfulness(processed, sample_rate)
             brainflow_restfulness = extract_brainflow_restfulness(processed, sample_rate)
             if band_powers or brainflow_mindfulness is not None or brainflow_restfulness is not None:

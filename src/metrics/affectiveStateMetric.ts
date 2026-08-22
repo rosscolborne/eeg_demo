@@ -1,12 +1,18 @@
 import type { SignalFrame } from "../domain/eeg";
 import {
+  frontalAlphaAsymmetry,
+  frontalChannels,
+  groupedPowers,
+  resolveBandPowers,
+  temporalChannels,
+} from "./bandPowerChannels";
+import { baselineSampleCount, vrchatStyleEmaDecay } from "./metricConfig";
+import {
   computeBrainflowsNeurofeedbackScores,
   smoothScore,
 } from "./neurofeedbackRatios";
-import { computeBandPowers, type FrequencyBand } from "../signalProcessing/bandPower";
+import type { FrequencyBand } from "../signalProcessing/bandPower";
 import type { HeadsetFitSnapshot } from "../signalQuality/headsetFitProvider";
-
-const vrchatStyleEmaDecay = 0.05;
 const neutralRadius = 0.18;
 
 const affectiveBands = [
@@ -72,10 +78,12 @@ export class AffectiveStateProvider {
   private smoothedFocusScore: number | null = null;
   private smoothedRelaxScore: number | null = null;
   private calibrationStatus: AffectiveCalibrationState["status"] = "off";
-  private readonly calibrationSampleCount = 24;
+  private readonly calibrationSampleCount = baselineSampleCount;
   private calibrationValenceValues: number[] = [];
   private calibrationArousalValues: number[] = [];
   private calibrationProfile: { valence: number; arousal: number } | null = null;
+  private recentValence: number[] = [];
+  private recentArousal: number[] = [];
 
   constructor(private readonly smoothingAlpha = vrchatStyleEmaDecay) {}
 
@@ -86,6 +94,8 @@ export class AffectiveStateProvider {
     this.smoothedBrainflowRestfulnessScore = null;
     this.smoothedFocusScore = null;
     this.smoothedRelaxScore = null;
+    this.recentValence = [];
+    this.recentArousal = [];
     this.resetCalibration();
   }
 
@@ -96,6 +106,8 @@ export class AffectiveStateProvider {
     this.calibrationProfile = null;
     this.smoothedValence = null;
     this.smoothedArousal = null;
+    this.recentValence = [];
+    this.recentArousal = [];
   }
 
   resetCalibration() {
@@ -105,6 +117,8 @@ export class AffectiveStateProvider {
     this.calibrationProfile = null;
     this.smoothedValence = null;
     this.smoothedArousal = null;
+    this.recentValence = [];
+    this.recentArousal = [];
   }
 
   getCalibrationState(): AffectiveCalibrationState {
@@ -126,17 +140,42 @@ export class AffectiveStateProvider {
   ): AffectiveStateSample | null {
     if (quality?.excessiveArtifact) return null;
 
-    const powers = frame.features?.bandPowers?.absolute ?? computeBandPowers(frame, affectiveBands)?.powers;
-    if (!powers) return null;
+    const resolved = resolveBandPowers(frame, affectiveBands, quality);
+    if (!resolved) return null;
 
+    const powers = resolved.powers;
     const thetaPower = finitePower(powers.theta);
     const alphaPower = finitePower(powers.alpha);
     const betaPower = finitePower(powers.beta);
     const gammaPower = finitePower(powers.gamma);
     if (thetaPower + alphaPower + betaPower + gammaPower <= 0) return null;
 
-    const rawArousal = mapRatioToAxis((betaPower + gammaPower) / (alphaPower + thetaPower + 1e-9));
-    const rawValence = mapRatioToAxis(alphaPower / (thetaPower + betaPower + 1e-9));
+    const frontal = groupedPowers(
+      resolved.perChannel,
+      frontalChannels,
+      powers,
+      resolved.usableChannelKeys,
+    );
+    const temporal = groupedPowers(
+      resolved.perChannel,
+      temporalChannels,
+      powers,
+      resolved.usableChannelKeys,
+    );
+    const arousalAlpha = frontal.alpha || alphaPower;
+    const arousalTheta = frontal.theta || thetaPower;
+    const arousalBeta = frontal.beta || betaPower;
+    const rawArousal = mapRatioToAxis(
+      arousalBeta / (arousalAlpha + arousalTheta + 1e-9),
+    );
+    const faa = frontalAlphaAsymmetry(
+      resolved.perChannel,
+      resolved.usableChannelKeys,
+    );
+    const rawValence =
+      faa === null
+        ? mapRatioToAxis(alphaPower / (thetaPower + betaPower + 1e-9))
+        : clamp(Math.tanh(faa / 0.8), -1, 1);
     this.acceptCalibrationSample(rawValence, rawArousal);
     const calibratedValence =
       this.calibrationProfile === null
@@ -146,10 +185,15 @@ export class AffectiveStateProvider {
       this.calibrationProfile === null
         ? rawArousal
         : clamp(rawArousal - this.calibrationProfile.arousal, -1, 1);
-    const neurofeedbackScores = computeBrainflowsNeurofeedbackScores({
-      thetaPower,
-      alphaPower,
-      betaPower,
+    const focusScores = computeBrainflowsNeurofeedbackScores({
+      thetaPower: frontal.theta || thetaPower,
+      alphaPower: frontal.alpha || alphaPower,
+      betaPower: frontal.beta || betaPower,
+    });
+    const relaxScores = computeBrainflowsNeurofeedbackScores({
+      thetaPower: temporal.theta || thetaPower,
+      alphaPower: temporal.alpha || alphaPower,
+      betaPower: temporal.beta || betaPower,
     });
     const rawBrainflowMindfulnessScore = normalizeBrainflowMindfulness(
       readBrainflowMetric(frame, [
@@ -192,17 +236,23 @@ export class AffectiveStateProvider {
           );
     this.smoothedFocusScore = smoothScore(
       this.smoothedFocusScore,
-      neurofeedbackScores.focusScore,
+      focusScores.focusScore,
       this.smoothingAlpha,
     );
     this.smoothedRelaxScore = smoothScore(
       this.smoothedRelaxScore,
-      neurofeedbackScores.relaxScore,
+      relaxScores.relaxScore,
       this.smoothingAlpha,
     );
 
     const valence = clamp(this.smoothedValence, -1, 1);
     const arousal = clamp(this.smoothedArousal, -1, 1);
+    this.recentValence.push(valence);
+    this.recentArousal.push(arousal);
+    if (this.recentValence.length > 12) {
+      this.recentValence.shift();
+      this.recentArousal.shift();
+    }
     const brainflowMindfulnessScore =
       rawBrainflowMindfulnessScore === null ||
       this.smoothedBrainflowMindfulnessScore === null
@@ -222,7 +272,7 @@ export class AffectiveStateProvider {
       rawArousal,
       calibrationActive: this.calibrationProfile !== null,
       label: classifyAffectiveState(valence, arousal),
-      confidence: estimateConfidence(valence, arousal, quality),
+      confidence: estimateConfidence(this.recentValence, this.recentArousal, quality),
       scoreSource: "eeg_band_power_proxy",
       thetaPower,
       alphaPower,
@@ -309,14 +359,24 @@ function classifyAffectiveState(valence: number, arousal: number) {
 }
 
 function estimateConfidence(
-  valence: number,
-  arousal: number,
+  recentValence: number[],
+  recentArousal: number[],
   quality?: HeadsetFitSnapshot | null,
 ) {
-  const distance = Math.min(1, Math.hypot(valence, arousal));
   const qualityFactor = quality?.ready ? 1 : quality?.state === "good" ? 0.75 : 0.45;
+  const stability =
+    recentValence.length < 4
+      ? 0.5
+      : 1 / (1 + 4 * (stdDev(recentValence) + stdDev(recentArousal)));
 
-  return clamp(distance * qualityFactor, 0, 1);
+  return clamp(qualityFactor * stability, 0, 1);
+}
+
+function stdDev(values: number[]) {
+  const mean = values.reduce((total, value) => total + value, 0) / values.length;
+  const variance =
+    values.reduce((total, value) => total + (value - mean) ** 2, 0) / values.length;
+  return Math.sqrt(variance);
 }
 
 function clamp(value: number, min: number, max: number) {
