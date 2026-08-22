@@ -503,11 +503,19 @@ function YouTubeTrainingPlayer({
 
   useEffect(() => {
     let cancelled = false;
+    // The YouTube IFrame API replaces whatever element it's given with its
+    // own <iframe>, which would yank the node out from under React (it owns
+    // and tracks `containerRef`'s div) and crash on unmount with a
+    // "removeChild" DOM error. Give the API a mount point React never
+    // renders or tracks, nested inside the div React does own, so React's
+    // unmount only ever has to remove its own untouched wrapper.
+    const mountNode = document.createElement("div");
+    containerRef.current?.appendChild(mountNode);
 
     loadYouTubeIframeApi().then((YT) => {
-      if (cancelled || !containerRef.current) return;
+      if (cancelled) return;
 
-      playerRef.current = new YT.Player(containerRef.current, {
+      playerRef.current = new YT.Player(mountNode, {
         videoId,
         playerVars: {
           autoplay: 1,
@@ -539,6 +547,12 @@ function YouTubeTrainingPlayer({
         console.warn("Unable to destroy YouTube training player", error);
       }
       playerRef.current = null;
+      // Defensive cleanup: destroy() removes the iframe it created but not
+      // the original mount node's replacement, so clear anything YouTube
+      // left behind in the wrapper React itself will unmount next.
+      if (containerRef.current) {
+        containerRef.current.innerHTML = "";
+      }
     };
   }, [videoId]);
 
