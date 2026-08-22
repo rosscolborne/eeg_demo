@@ -12,8 +12,10 @@ from brainflow_service.dsp import (
     build_eeg_window,
     extract_band_power_features,
     extract_brainflow_mindfulness,
+    extract_brainflow_restfulness,
     preprocess_eeg_window,
 )
+from brainflow_service.app import app
 from brainflow_service.models import SignalFeatures
 from brainflow_service.runtime import BrainFlowSession
 
@@ -85,10 +87,38 @@ def test_brainflow_mindfulness_extracts_bounded_score() -> None:
     assert 0 <= score <= 1
 
 
+def test_brainflow_restfulness_extracts_bounded_score() -> None:
+    pytest.importorskip("brainflow")
+
+    score = extract_brainflow_restfulness(sine_window(freq_hz=10, seconds=4), 256)
+
+    assert score is not None
+    assert 0 <= score <= 1
+
+
 def test_signal_features_serialize_for_frontend() -> None:
-    features = SignalFeatures(brainflowConcentration=0.42)
+    features = SignalFeatures(brainflowConcentration=0.42, brainflowRestfulness=0.64)
 
     assert features.model_dump(by_alias=True)["brainflowConcentration"] == 0.42
+    assert features.model_dump(by_alias=True)["brainflowRestfulness"] == 0.64
+
+
+def test_analyze_window_returns_brainflow_restfulness_for_frontend() -> None:
+    pytest.importorskip("brainflow")
+    pytest.importorskip("httpx")
+    from fastapi.testclient import TestClient
+
+    samples = sine_window(freq_hz=10, seconds=4).T.tolist()
+    response = TestClient(app).post(
+        "/analyze-window",
+        json={"sampleRateHz": 256, "samples": samples},
+    )
+
+    assert response.status_code == 200
+    features = response.json()["features"]
+    assert features["brainflowConcentration"] is not None
+    assert features["brainflowRestfulness"] is not None
+    assert 0 <= features["brainflowRestfulness"] <= 1
 
 
 def test_brainflow_device_configs_include_live_and_synthetic() -> None:
@@ -130,6 +160,8 @@ async def collect_one_frame():
                 assert frame.features.band_powers.absolute["beta"] >= 0
                 assert frame.features.brainflow_concentration is not None
                 assert 0 <= frame.features.brainflow_concentration <= 1
+                assert frame.features.brainflow_restfulness is not None
+                assert 0 <= frame.features.brainflow_restfulness <= 1
                 return
     finally:
         session.stop()

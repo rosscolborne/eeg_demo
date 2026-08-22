@@ -14,6 +14,7 @@ from .dsp import (
     config_metadata,
     extract_band_power_features,
     extract_brainflow_mindfulness,
+    extract_brainflow_restfulness,
     preprocess_eeg_window,
 )
 from .models import DeviceInfo, SensorCapability, SignalChannel, SignalFeatures, SignalFrame, SignalQualityMetadata
@@ -148,10 +149,12 @@ class BrainFlowSession:
             processed = preprocess_eeg_window(window, sample_rate, self.processing)
             band_powers = extract_band_power_features(processed, sample_rate)
             brainflow_mindfulness = extract_brainflow_mindfulness(processed, sample_rate)
-            if band_powers or brainflow_mindfulness is not None:
+            brainflow_restfulness = extract_brainflow_restfulness(processed, sample_rate)
+            if band_powers or brainflow_mindfulness is not None or brainflow_restfulness is not None:
                 features = SignalFeatures(
                     bandPowers=band_powers,
                     brainflowConcentration=brainflow_mindfulness,
+                    brainflowRestfulness=brainflow_restfulness,
                 )
 
         return SignalFrame(

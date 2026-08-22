@@ -128,6 +128,14 @@ async function responseErrorMessage(response: Response) {
 }
 
 function formatBrainFlowError(error: unknown): ProviderError {
+  if (error instanceof TypeError) {
+    return {
+      message:
+        "BrainFlow service is not reachable. Start the Python BrainFlow service on http://127.0.0.1:8000, then try Connect again.",
+      recoverable: true,
+    };
+  }
+
   return {
     message:
       error instanceof Error

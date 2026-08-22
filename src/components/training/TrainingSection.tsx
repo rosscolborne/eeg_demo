@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   BarChart3,
   CirclePause,
@@ -9,7 +9,6 @@ import {
   Play,
   Square,
   Timer,
-  Waves,
 } from "lucide-react";
 import type { DeviceInfo, EegConnectionState, SignalFrame } from "../../domain/eeg";
 import {
@@ -22,7 +21,15 @@ import {
   type TrainingSessionState,
 } from "../../training/trainingSession";
 import type { HeadsetFitSnapshot } from "../../signalQuality/headsetFitProvider";
+import { InfoPopoverButton } from "../InfoPopoverButton";
 import { SeriesChart } from "./SeriesChart";
+
+declare global {
+  interface Window {
+    YT?: any;
+    onYouTubeIframeAPIReady?: () => void;
+  }
+}
 
 interface TrainingSectionProps {
   connectionState: EegConnectionState;
@@ -33,6 +40,7 @@ interface TrainingSectionProps {
 
 const defaultVideoUrl = "https://www.youtube.com/watch?v=uyb0wW0ln_g";
 const baselineSamplesRequired = 24;
+const defaultVideoId = getYoutubeVideoId(defaultVideoUrl);
 type TrainingPhase =
   | "idle"
   | "headset_check"
@@ -52,6 +60,7 @@ export function TrainingSection({
   const sessionRef = useRef(new TrainingSession());
   const lastFrameSequenceRef = useRef<number | null>(null);
   const phaseBeforePauseRef = useRef<TrainingPhase>("idle");
+  const videoStartedRef = useRef(false);
   const [sessionState, setSessionState] = useState<TrainingSessionState>("idle");
   const [elapsedMs, setElapsedMs] = useState(0);
   const [attentionSamples, setAttentionSamples] = useState<AttentionMetricSample[]>([]);
@@ -65,18 +74,35 @@ export function TrainingSection({
     eegStreaming && attentionSamples.length > 0
       ? attentionSamples[attentionSamples.length - 1].displayedScore
       : null;
+  const currentSample =
+    eegStreaming && attentionSamples.length > 0
+      ? attentionSamples[attentionSamples.length - 1]
+      : null;
   const showVideo =
     phase === "training" || (phase === "paused" && hasStartedTraining);
-  const videoEmbedUrl = useMemo(() => toYoutubeEmbedUrl(defaultVideoUrl, showVideo), [showVideo]);
   const isRunning = sessionState === "running";
   const isPaused = sessionState === "paused";
-  const canPause = isRunning || isPaused;
-  const canEnd = isRunning || isPaused;
+  const canPause = hasStartedTraining && (isRunning || isPaused);
+  const canEnd = isRunning || isPaused || phase === "training";
   const qualityAllowsScoring = eegStreaming && !fit.excessiveArtifact;
-  const primaryAction = getPrimaryAction(phase, isRunning, isPaused);
+  const calibrationInProgress = phase === "headset_check" || phase === "baseline";
+  const canStartCalibration =
+    !hasStartedTraining &&
+    !calibrationInProgress &&
+    sessionState !== "paused" &&
+    phase !== "training";
+  const canStartTraining =
+    eegStreaming && !calibrationInProgress && !hasStartedTraining && !isPaused;
+  const setupDetail =
+    phase === "baseline" && qualityAllowsScoring
+      ? `Baseline calibration ${baselineProgress}/${baselineSamplesRequired} samples.`
+      : phase === "baseline"
+        ? "Calibration waits for EEG stream and excessive-artifact checks only."
+        : fit.blockers[0] ?? fit.message;
+  const signalStatus = getTrainingSignalStatus(connectionState, fit);
 
   useEffect(() => {
-    if (!isRunning) return;
+    if (!isRunning || !hasStartedTraining) return;
 
     const intervalId = window.setInterval(() => {
       setElapsedMs(sessionRef.current.snapshot(deviceInfo).elapsedMs);
@@ -110,6 +136,7 @@ export function TrainingSection({
   useEffect(() => {
     if (!latestFrame || sessionState !== "running") return;
     if (phase !== "baseline" && phase !== "training") return;
+    if (phase === "training" && !hasStartedTraining) return;
     if (lastFrameSequenceRef.current === latestFrame.sequenceId) return;
 
     lastFrameSequenceRef.current = latestFrame.sequenceId;
@@ -127,6 +154,7 @@ export function TrainingSection({
       setBaselineProgress(nextBaselineProgress);
       if (nextBaselineProgress >= baselineSamplesRequired) {
         sessionRef.current.addTimelineEvent("Baseline calibration complete");
+        setSessionState("idle");
         setPhase("calibrated");
       }
       return;
@@ -144,10 +172,11 @@ export function TrainingSection({
   ]);
 
   function startCalibration() {
-    metricProviderRef.current.reset();
-    sessionRef.current.start();
+    metricProviderRef.current.reset({ useBaselineRelativeDisplay: true });
+    sessionRef.current = new TrainingSession();
     sessionRef.current.addTimelineEvent("Headset check started");
     lastFrameSequenceRef.current = null;
+    videoStartedRef.current = false;
     setAttentionSamples([]);
     setReport(null);
     setElapsedMs(0);
@@ -158,20 +187,31 @@ export function TrainingSection({
   }
 
   function beginTraining() {
-    sessionRef.current.addTimelineEvent("Training started");
+    if (phase !== "calibrated") {
+      metricProviderRef.current.reset({ useBaselineRelativeDisplay: false });
+      sessionRef.current = new TrainingSession();
+    } else {
+      metricProviderRef.current.setBaselineRelativeDisplay(true);
+    }
+    videoStartedRef.current = false;
     setAttentionSamples([]);
-    setHasStartedTraining(true);
+    setElapsedMs(0);
+    setHasStartedTraining(false);
     setPhase("training");
   }
 
-  function handlePrimaryAction() {
-    if (phase === "calibrated") {
-      beginTraining();
-      return;
-    }
+  const startTrainingAfterVideoPlay = useCallback(() => {
+    if (videoStartedRef.current || phase !== "training") return;
 
-    startCalibration();
-  }
+    videoStartedRef.current = true;
+    sessionRef.current.start();
+    sessionRef.current.addTimelineEvent("Training started");
+    lastFrameSequenceRef.current = null;
+    setAttentionSamples([]);
+    setElapsedMs(0);
+    setHasStartedTraining(true);
+    setSessionState("running");
+  }, [phase]);
 
   function togglePause() {
     if (sessionState === "running") {
@@ -191,11 +231,20 @@ export function TrainingSection({
   }
 
   function endSession() {
-    sessionRef.current.end();
-    setElapsedMs(sessionRef.current.snapshot(deviceInfo).elapsedMs);
-    setReport(sessionRef.current.report(deviceInfo));
+    let nextReport: TrainingSessionReport | null = null;
+    if (hasStartedTraining) {
+      sessionRef.current.end();
+      setElapsedMs(sessionRef.current.snapshot(deviceInfo).elapsedMs);
+      try {
+        nextReport = sessionRef.current.report(deviceInfo);
+      } catch (error) {
+        console.error("[Training report error]", error);
+      }
+    }
+    videoStartedRef.current = false;
     setSessionState("ended");
     setPhase("ended");
+    window.setTimeout(() => setReport(nextReport), 0);
   }
 
   return (
@@ -215,29 +264,36 @@ export function TrainingSection({
                 <Play aria-hidden="true" />
               </div>
               <div>
-              <h2>Focus Training — YouTube</h2>
-                <p>Watch a video while tracking a BrainFlow-derived Attention Index.</p>
+                <h2>Focus Training — YouTube</h2>
+                <p>Watch a video while tracking BrainFlow-derived mindfulness metrics.</p>
               </div>
             </div>
           </div>
           <div className="training-progress-strip">
             <div className="progress-strip-copy">
-              <span>Session setup</span>
-              <strong>{phaseLabel(phase)}</strong>
-              <small>
-                {phase === "baseline" && qualityAllowsScoring
-                  ? `Baseline calibration ${baselineProgress}/${baselineSamplesRequired} samples.`
-                  : phase === "baseline"
-                    ? "Calibration waits for EEG stream and excessive-artifact checks only."
-                  : fit.blockers[0] ?? fit.message}
-              </small>
+              <div className="training-phase-copy">
+                <strong>
+                  {phase === "training" && !hasStartedTraining
+                    ? "Waiting for video playback."
+                    : phaseLabel(phase)}
+                </strong>
+                {setupDetail !== signalStatus.label && <small>{setupDetail}</small>}
+              </div>
+              <strong className={`training-signal-status is-${signalStatus.tone}`}>
+                {signalStatus.label}
+              </strong>
+              <div className="training-status-summary">
+                <span className="training-elapsed">
+                  <Timer aria-hidden="true" />
+                  {formatDuration(elapsedMs)}
+                </span>
+              </div>
             </div>
             <div className="gate-steps is-horizontal">
               {[
                 "Connect device",
                 "Headset check",
                 "Stable signal",
-                "Baseline calibration",
                 "Training",
               ].map((step, index) => (
                 <div
@@ -268,19 +324,18 @@ export function TrainingSection({
           </div>
           <div className="video-frame">
             {showVideo ? (
-              <iframe
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                allowFullScreen
-                src={videoEmbedUrl}
-                title="Focus training YouTube video"
+              <YouTubeTrainingPlayer
+                onPlaying={startTrainingAfterVideoPlay}
+                paused={isPaused}
+                videoId={defaultVideoId}
               />
             ) : (
               <div className="video-placeholder">
                 <div className="icon-tile">
                   <Play aria-hidden="true" />
                 </div>
-                <strong>Video starts after calibration</strong>
-                <span>Complete the headset check and baseline before training.</span>
+                <strong>Video starts when training begins</strong>
+                <span>Start training directly, or calibrate first for baseline-relative scores.</span>
               </div>
             )}
           </div>
@@ -293,41 +348,60 @@ export function TrainingSection({
                 <Gauge aria-hidden="true" />
               </div>
               <div>
-                <h2>Attention Index — Experimental</h2>
-                <p>BrainFlow Mindfulness output, with diagnostic fallback if unavailable.</p>
+                <h2>Brain Metrics</h2>
+                <p>BrainFlow mental-state outputs with band-ratio comparison scores.</p>
               </div>
+              <InfoPopoverButton ariaLabel="Explain brain metrics" preferredSide="left">
+                <p>
+                  Mindfulness starts from BrainFlow's MLModel Mindfulness output,
+                  then uses the session baseline and smoothing only if calibration
+                  was run before training.
+                </p>
+                <p>
+                  Restfulness uses BrainFlow's MLModel Restfulness output when
+                  available. If BrainFlow does not provide that metric, the
+                  value stays blank.
+                </p>
+                <p>
+                  Focus starts from a beta/theta band-power ratio. Relax starts
+                  from an alpha/theta band-power ratio. They are currently shown
+                  as direct smoothed 0-100 scores unless calibration was run
+                  before training.
+                </p>
+              </InfoPopoverButton>
             </div>
-            <div className="attention-score">
-              <strong>{currentScore === null ? "--" : currentScore}</strong>
-              <span>0-100</span>
+            <div className="metric-score-grid">
+              <MetricScore label="Mindfulness" value={currentScore} />
+              <MetricScore label="Restfulness" value={currentSample?.restfulnessScore ?? null} />
+              <MetricScore label="Focus" value={currentSample?.focusScore ?? null} />
+              <MetricScore label="Relax" value={currentSample?.relaxScore ?? null} />
             </div>
             <p className="metric-note">
               Experimental feedback only. This is not a validated or clinical measure
-              of focus.
+              of mental state.
             </p>
-          </article>
-
-          <article className="panel session-stats-card">
-            <div className="stat-line">
-              <Timer aria-hidden="true" />
-              <span>Elapsed</span>
-              <strong>{formatDuration(elapsedMs)}</strong>
-            </div>
-            <div className="stat-line">
-              <Waves aria-hidden="true" />
-              <span>Signal quality</span>
-              <strong>{fit.message}</strong>
-            </div>
           </article>
 
           <article className="panel session-actions">
             <button
-              className="primary-button"
-              onClick={handlePrimaryAction}
-              disabled={primaryAction.disabled}
+              className="secondary-button"
+              onClick={startCalibration}
+              disabled={!canStartCalibration}
             >
               <CirclePlay aria-hidden="true" />
-              {primaryAction.label}
+              {calibrationInProgress
+                ? `Calibrating ${baselineProgress}/${baselineSamplesRequired}`
+                : phase === "calibrated"
+                  ? "Re-run Calibration"
+                  : "Start Calibration"}
+            </button>
+            <button
+              className="primary-button"
+              onClick={beginTraining}
+              disabled={!canStartTraining}
+            >
+              <CirclePlay aria-hidden="true" />
+              Start Training
             </button>
             <button
               className="secondary-button"
@@ -342,6 +416,7 @@ export function TrainingSection({
               End Session
             </button>
           </article>
+
         </aside>
       </section>
 
@@ -352,8 +427,8 @@ export function TrainingSection({
               <LineChart aria-hidden="true" />
             </div>
             <div>
-              <h2>Attention Index Over Time</h2>
-              <p>Smoothed BrainFlow Mindfulness output from reliable training frames.</p>
+              <h2>BrainFlow Metrics Over Time</h2>
+              <p>Smoothed BrainFlow Mindfulness and Restfulness plus Focus and Relax ratio scores.</p>
             </div>
           </div>
           <span className="panel-meta">
@@ -362,15 +437,39 @@ export function TrainingSection({
         </div>
         <SeriesChart
           emptyTitle="Start a focus session"
-          emptyDescription="Attention Index samples will appear as normalized EEG frames arrive."
+          emptyDescription="BrainFlow metric samples will appear as normalized EEG frames arrive."
           height={220}
           lines={[
             {
-              label: "Attention Index",
+              label: "Mindfulness",
               color: "#a78bfa",
               values: attentionSamples.map((sample) => ({
                 atMs: sample.atMs,
                 value: sample.displayedScore,
+              })),
+            },
+            {
+              label: "Restfulness",
+              color: "#f9a8d4",
+              values: attentionSamples.map((sample) => ({
+                atMs: sample.atMs,
+                value: sample.restfulnessScore,
+              })),
+            },
+            {
+              label: "Focus",
+              color: "#67e8f9",
+              values: attentionSamples.map((sample) => ({
+                atMs: sample.atMs,
+                value: sample.focusScore,
+              })),
+            },
+            {
+              label: "Relax",
+              color: "#4ade80",
+              values: attentionSamples.map((sample) => ({
+                atMs: sample.atMs,
+                value: sample.relaxScore,
               })),
             },
           ]}
@@ -384,9 +483,95 @@ export function TrainingSection({
   );
 }
 
-function TrainingReport({ report }: { report: TrainingSessionReport }) {
-  const sessionStartMs = report.timeline[0]?.atMs;
+function YouTubeTrainingPlayer({
+  onPlaying,
+  paused,
+  videoId,
+}: {
+  onPlaying: () => void;
+  paused: boolean;
+  videoId: string;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const playerRef = useRef<any>(null);
+  const onPlayingRef = useRef(onPlaying);
 
+  useEffect(() => {
+    onPlayingRef.current = onPlaying;
+  }, [onPlaying]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    loadYouTubeIframeApi().then((YT) => {
+      if (cancelled || !containerRef.current) return;
+
+      playerRef.current = new YT.Player(containerRef.current, {
+        videoId,
+        playerVars: {
+          autoplay: 1,
+          controls: 1,
+          modestbranding: 1,
+          mute: 1,
+          playsinline: 1,
+          rel: 0,
+        },
+        events: {
+          onReady: (event: any) => {
+            event.target.mute();
+            event.target.playVideo();
+          },
+          onStateChange: (event: any) => {
+            if (event.data === YT.PlayerState.PLAYING) {
+              onPlayingRef.current();
+            }
+          },
+        },
+      });
+    });
+
+    return () => {
+      cancelled = true;
+      try {
+        playerRef.current?.destroy?.();
+      } catch (error) {
+        console.warn("Unable to destroy YouTube training player", error);
+      }
+      playerRef.current = null;
+    };
+  }, [videoId]);
+
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player) return;
+
+    if (paused) {
+      player.pauseVideo?.();
+    } else {
+      player.playVideo?.();
+    }
+  }, [paused]);
+
+  return <div className="youtube-player" ref={containerRef} />;
+}
+
+function MetricScore({
+  label,
+  value,
+}: {
+  label: string;
+  value: number | null;
+}) {
+  return (
+    <div className="metric-score-tile">
+      <span>{label}</span>
+      <strong>{formatScore(value)}</strong>
+      <small>0-100</small>
+    </div>
+  );
+}
+
+function TrainingReport({ report }: { report: TrainingSessionReport }) {
   return (
     <section className="training-report">
       <div className="panel-header report-heading">
@@ -404,10 +589,10 @@ function TrainingReport({ report }: { report: TrainingSessionReport }) {
       <div className="report-summary">
         <ReportStat label="Duration" value={formatDuration(report.durationMs)} />
         <ReportStat
-          label="Average Attention"
+          label="Average Mindfulness"
           value={formatScore(report.averageAttention)}
         />
-        <ReportStat label="Peak Attention" value={formatScore(report.peakAttention)} />
+        <ReportStat label="Peak Mindfulness" value={formatScore(report.peakAttention)} />
         <ReportStat
           label="EEG Channels"
           value={String(report.signalQuality.eegChannelCount)}
@@ -418,7 +603,7 @@ function TrainingReport({ report }: { report: TrainingSessionReport }) {
         />
       </div>
 
-      <div className="report-grid">
+      <div className="report-chart-stack">
         <article className="panel">
           <div className="panel-header compact">
             <div className="panel-title">
@@ -427,23 +612,47 @@ function TrainingReport({ report }: { report: TrainingSessionReport }) {
               </div>
               <div>
                 <h2>Derived Metric</h2>
-                <p>BrainFlow-derived Attention Index over time.</p>
+                <p>BrainFlow mental-state outputs and ratio scores over time.</p>
               </div>
             </div>
           </div>
           <SeriesChart
-            emptyTitle="No attention samples"
+            emptyTitle="No BrainFlow metric samples"
             emptyDescription="The session ended before metric samples were produced."
             height={220}
             min={0}
             max={100}
             lines={[
               {
-                label: "Attention Index",
+                label: "Mindfulness",
                 color: "#a78bfa",
                 values: report.attentionSeries.map((sample) => ({
                   atMs: sample.atMs,
                   value: sample.displayedScore,
+                })),
+              },
+              {
+                label: "Restfulness",
+                color: "#f9a8d4",
+                values: report.attentionSeries.map((sample) => ({
+                  atMs: sample.atMs,
+                  value: sample.restfulnessScore,
+                })),
+              },
+              {
+                label: "Focus",
+                color: "#67e8f9",
+                values: report.attentionSeries.map((sample) => ({
+                  atMs: sample.atMs,
+                  value: sample.focusScore,
+                })),
+              },
+              {
+                label: "Relax",
+                color: "#4ade80",
+                values: report.attentionSeries.map((sample) => ({
+                  atMs: sample.atMs,
+                  value: sample.relaxScore,
                 })),
               },
             ]}
@@ -494,140 +703,6 @@ function TrainingReport({ report }: { report: TrainingSessionReport }) {
             ]}
           />
         </article>
-
-        <article className="panel">
-          <div className="panel-header compact">
-            <div className="panel-title">
-              <div className="icon-tile">
-                <Gauge aria-hidden="true" />
-              </div>
-              <div>
-                <h2>Heuristic Ratio</h2>
-                <p>Diagnostic beta divided by alpha plus theta, with baseline-relative value.</p>
-              </div>
-            </div>
-          </div>
-          <SeriesChart
-            emptyTitle="No ratio samples"
-            emptyDescription="The ratio appears after EEG frames are processed."
-            height={220}
-            lines={[
-              {
-                label: "Raw ratio",
-                color: "#a78bfa",
-                values: report.ratioSeries.map((sample) => ({
-                  atMs: sample.atMs,
-                  value: sample.rawRatio,
-                })),
-              },
-              {
-                label: "Baseline-relative",
-                color: "#67e8f9",
-                values: report.ratioSeries.map((sample) => ({
-                  atMs: sample.atMs,
-                  value: sample.baselineRelativeValue,
-                })),
-              },
-            ]}
-          />
-        </article>
-
-        <article className="panel report-detail-card">
-          <div className="panel-header compact">
-            <div className="panel-title">
-              <div className="icon-tile raw-icon">
-                <Waves aria-hidden="true" />
-              </div>
-              <div>
-                <h2>EEG Signal</h2>
-                <p>Raw measurement context reported by the provider.</p>
-              </div>
-            </div>
-          </div>
-          <dl className="detail-list">
-            <div>
-              <dt>Samples processed</dt>
-              <dd>{report.signalQuality.sampleCount}</dd>
-            </div>
-            <div>
-              <dt>Channels</dt>
-              <dd>
-                {report.signalQuality.eegChannels.map((channel) => channel.label).join(", ") ||
-                  "Unavailable"}
-              </dd>
-            </div>
-          </dl>
-        </article>
-      </div>
-
-      <div className="report-compact-grid">
-        <article className="panel report-detail-card">
-          <div className="panel-header compact">
-            <div className="panel-title">
-              <div className="icon-tile raw-icon">
-                <Waves aria-hidden="true" />
-              </div>
-              <div>
-                <h2>Quality Timeline</h2>
-                <p>Signal-quality state recorded during the session.</p>
-              </div>
-            </div>
-          </div>
-          <ol className="timeline-list report-scroll">
-            {report.qualityTimeline.map((snapshot) => (
-              <li key={`${snapshot.updatedAtMs}-${snapshot.state}`}>
-                <span>
-                  <time>{formatRelativeTime(snapshot.updatedAtMs, sessionStartMs)}</time>
-                  {snapshot.message}
-                </span>
-                <strong>{snapshot.state}</strong>
-              </li>
-            ))}
-          </ol>
-        </article>
-
-        <article className="panel report-detail-card">
-          <div className="panel-header compact">
-            <div className="panel-title">
-              <div className="icon-tile">
-                <Gauge aria-hidden="true" />
-              </div>
-              <div>
-                <h2>Attention Periods</h2>
-                <p>Highest and lowest experimental metric points.</p>
-              </div>
-            </div>
-          </div>
-          <div className="report-scroll">
-            <PeriodList title="Highest" periods={report.highestPeriods} startMs={sessionStartMs} />
-            <PeriodList title="Lowest" periods={report.lowestPeriods} startMs={sessionStartMs} />
-            <PeriodList title="Poor Signal" periods={report.unreliablePeriods} startMs={sessionStartMs} />
-          </div>
-        </article>
-
-        <article className="panel report-detail-card">
-          <div className="panel-header compact">
-            <div className="panel-title">
-              <div className="icon-tile">
-                <Timer aria-hidden="true" />
-              </div>
-              <div>
-                <h2>Session Timeline</h2>
-                <p>Training session lifecycle events.</p>
-              </div>
-            </div>
-          </div>
-          <ol className="timeline-list report-scroll">
-            {report.timeline.map((event) => (
-              <li key={`${event.label}-${event.atMs}`}>
-                <span>
-                  <time>{formatRelativeTime(event.atMs, sessionStartMs)}</time>
-                  {event.label}
-                </span>
-              </li>
-            ))}
-          </ol>
-        </article>
       </div>
     </section>
   );
@@ -642,54 +717,40 @@ function ReportStat({ label, value }: { label: string; value: string }) {
   );
 }
 
-function PeriodList({
-  title,
-  periods,
-  startMs,
-}: {
-  title: string;
-  periods: Array<{ label: string; atMs: number; score: number }>;
-  startMs?: number;
-}) {
-  return (
-    <div className="period-list">
-      <h3>{title}</h3>
-      {periods.length === 0 ? (
-        <p>No samples recorded.</p>
-      ) : (
-        periods.map((period) => (
-          <div className="period-row" key={`${period.label}-${period.atMs}`}>
-            <span>
-              <time>{formatRelativeTime(period.atMs, startMs)}</time>
-              {period.label}
-            </span>
-            <strong>{period.score}</strong>
-          </div>
-        ))
-      )}
-    </div>
-  );
-}
-
-function toYoutubeEmbedUrl(url: string, autoplay: boolean) {
+function getYoutubeVideoId(url: string) {
   try {
     const parsed = new URL(url);
-    const params = autoplay ? "?autoplay=1&mute=1&playsinline=1" : "";
-    const channelMatch = parsed.pathname.match(/\/channel\/(UC[a-zA-Z0-9_-]+)/);
-    if (channelMatch?.[1]) {
-      const separator = autoplay ? "&" : "?";
-      return `https://www.youtube.com/embed/videoseries${params}${separator}list=UU${channelMatch[1].slice(2)}`;
-    }
-
-    const videoId =
-      parsed.hostname === "youtu.be"
-        ? parsed.pathname.slice(1)
-        : parsed.searchParams.get("v");
-
-    return videoId ? `https://www.youtube.com/embed/${videoId}${params}` : "";
+    return parsed.hostname === "youtu.be"
+      ? parsed.pathname.slice(1)
+      : parsed.searchParams.get("v") ?? "";
   } catch {
     return "";
   }
+}
+
+let youtubeApiPromise: Promise<any> | null = null;
+
+function loadYouTubeIframeApi() {
+  if (window.YT?.Player) return Promise.resolve(window.YT);
+
+  youtubeApiPromise ??= new Promise((resolve) => {
+    const previousReady = window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady = () => {
+      previousReady?.();
+      resolve(window.YT);
+    };
+
+    const existingScript = document.querySelector(
+      'script[src="https://www.youtube.com/iframe_api"]',
+    );
+    if (existingScript) return;
+
+    const script = document.createElement("script");
+    script.src = "https://www.youtube.com/iframe_api";
+    document.head.appendChild(script);
+  });
+
+  return youtubeApiPromise;
 }
 
 function formatDuration(ms: number) {
@@ -702,10 +763,6 @@ function formatDuration(ms: number) {
 
 function formatScore(score: number | null) {
   return score === null ? "--" : String(Math.round(score));
-}
-
-function formatRelativeTime(atMs: number, startMs = atMs) {
-  return formatDuration(atMs - startMs);
 }
 
 function phaseLabel(phase: TrainingPhase) {
@@ -724,30 +781,30 @@ function activeGateIndex(
   ready: boolean,
 ) {
   const connected = connectionState === "connected" || connectionState === "streaming";
-  if (phase === "training" || phase === "ended") return 4;
-  if (phase === "calibrated") return 3;
-  if (phase === "baseline") return 3;
+  if (phase === "training" || phase === "ended") return 3;
+  if (phase === "calibrated") return 2;
+  if (phase === "baseline") return 2;
   if (ready) return 2;
   if (phase === "headset_check") return connected ? 1 : 0;
   return connected ? 0 : -1;
 }
 
-function getPrimaryAction(
-  phase: TrainingPhase,
-  isRunning: boolean,
-  isPaused: boolean,
+function getTrainingSignalStatus(
+  connectionState: EegConnectionState,
+  fit: HeadsetFitSnapshot,
 ) {
-  if (phase === "calibrated") {
-    return { label: "Start Session", disabled: isPaused };
+  const connected = connectionState === "connected" || connectionState === "streaming";
+  if (!connected) {
+    return { label: "Connect an EEG device.", tone: "error" as const };
   }
 
-  if (phase === "headset_check" || phase === "baseline") {
-    return { label: "Calibrating...", disabled: true };
+  const anyWeakChannel = fit.channels.some((channel) => channel.state !== "good");
+  if (fit.ready || (fit.state === "good" && !anyWeakChannel)) {
+    return { label: fit.message || "Signal quality good", tone: "good" as const };
   }
 
-  if (phase === "training") {
-    return { label: "Session Active", disabled: true };
-  }
-
-  return { label: "Start Calibration", disabled: isRunning || isPaused };
+  return {
+    label: fit.message || "Check signal quality",
+    tone: anyWeakChannel ? ("warning" as const) : ("error" as const),
+  };
 }

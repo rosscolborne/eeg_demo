@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import logging
 
 import numpy as np
 
 from .config import DEFAULT_BANDS, DEFAULT_PROCESSING, FrequencyBand, ProcessingConfig
 from .models import BandPowerFeatures
+
+logger = logging.getLogger(__name__)
 
 
 def build_eeg_window(data: np.ndarray, eeg_channels: list[int], samples: int) -> np.ndarray | None:
@@ -115,7 +118,11 @@ def extract_band_power_features(
     )
 
 
-def extract_brainflow_mindfulness(window: np.ndarray, sampling_rate: int) -> float | None:
+def extract_brainflow_mental_state(
+    window: np.ndarray,
+    sampling_rate: int,
+    metric: str,
+) -> float | None:
     if window.size == 0 or window.shape[1] < max(16, sampling_rate):
         return None
     if not np.isfinite(window).all():
@@ -130,6 +137,13 @@ def extract_brainflow_mindfulness(window: np.ndarray, sampling_rate: int) -> flo
             MLModel,
         )
 
+        metric_id = {
+            "mindfulness": BrainFlowMetrics.MINDFULNESS.value,
+            "restfulness": BrainFlowMetrics.RESTFULNESS.value,
+        }.get(metric)
+        if metric_id is None:
+            return None
+
         eeg_rows = list(range(window.shape[0]))
         avg_band_powers, _ = DataFilter.get_avg_band_powers(
             np.ascontiguousarray(window),
@@ -139,7 +153,7 @@ def extract_brainflow_mindfulness(window: np.ndarray, sampling_rate: int) -> flo
         )
         model = MLModel(
             BrainFlowModelParams(
-                BrainFlowMetrics.MINDFULNESS.value,
+                metric_id,
                 BrainFlowClassifiers.DEFAULT_CLASSIFIER.value,
             ),
         )
@@ -152,8 +166,17 @@ def extract_brainflow_mindfulness(window: np.ndarray, sampling_rate: int) -> flo
         if len(prediction) == 0 or not np.isfinite(prediction[0]):
             return None
         return float(np.clip(prediction[0], 0.0, 1.0))
-    except Exception:
+    except Exception as exc:
+        logger.warning("BrainFlow %s metric extraction failed: %s", metric, exc)
         return None
+
+
+def extract_brainflow_mindfulness(window: np.ndarray, sampling_rate: int) -> float | None:
+    return extract_brainflow_mental_state(window, sampling_rate, "mindfulness")
+
+
+def extract_brainflow_restfulness(window: np.ndarray, sampling_rate: int) -> float | None:
+    return extract_brainflow_mental_state(window, sampling_rate, "restfulness")
 
 
 def config_metadata(config: ProcessingConfig = DEFAULT_PROCESSING) -> dict[str, object]:

@@ -10,9 +10,14 @@ import type {
   EegConnectionState,
   EegProviderEvents,
   ProviderError,
+  SignalFeatures,
   SignalFrame,
 } from "../domain/eeg";
 import type { EegProvider, EegProviderDescriptor } from "./eegProvider";
+
+const defaultBrainFlowServiceUrl =
+  import.meta.env.VITE_BRAINFLOW_SERVICE_URL ?? "http://127.0.0.1:8000";
+const analysisWindowSeconds = 2;
 
 export class MuseAthenaBluetoothProvider implements EegProvider {
   readonly descriptor: EegProviderDescriptor = {
@@ -23,8 +28,15 @@ export class MuseAthenaBluetoothProvider implements EegProvider {
 
   private transport: BleTransport | null = null;
   private deviceInfo: DeviceInfo | null = null;
+  private analysisBuffer: number[][] = [];
+  private analysisInFlight = false;
+  private analysisFailureReported = false;
+  private emittedSequenceId = 0;
 
-  constructor(private readonly events: EegProviderEvents) {}
+  constructor(
+    private readonly events: EegProviderEvents,
+    private readonly brainFlowServiceUrl = defaultBrainFlowServiceUrl,
+  ) {}
 
   getDeviceInfo() {
     return this.deviceInfo;
@@ -40,6 +52,10 @@ export class MuseAthenaBluetoothProvider implements EegProvider {
     }
 
     this.events.onState("connecting", "Opening Chrome Web Bluetooth chooser");
+    this.analysisBuffer = [];
+    this.analysisInFlight = false;
+    this.analysisFailureReported = false;
+    this.emittedSequenceId = 0;
 
     try {
       await initEegWasm(eegWasmUrl);
@@ -66,7 +82,9 @@ export class MuseAthenaBluetoothProvider implements EegProvider {
           });
         }
       };
-      transport.onFrame = (frame) => this.handleFrame(frame);
+      transport.onFrame = (frame) => {
+        void this.handleFrame(frame);
+      };
 
       await transport.connect();
       this.publishDeviceInfo(transport);
@@ -95,11 +113,26 @@ export class MuseAthenaBluetoothProvider implements EegProvider {
     this.events.onState("disconnected", reason);
   }
 
-  private handleFrame(frame: HeadbandFrameV1) {
+  private async handleFrame(frame: HeadbandFrameV1) {
     const eeg = frame.eegRaw ?? frame.eeg;
     if (!this.deviceInfo) {
       this.publishDeviceInfo(this.transport, frame);
     }
+    this.analysisBuffer.push(...eeg.samples);
+
+    const sampleRate = eeg.sampleRateHz;
+    const maxSamples = Math.max(1, Math.round(sampleRate * analysisWindowSeconds));
+    if (this.analysisBuffer.length > maxSamples) {
+      this.analysisBuffer = this.analysisBuffer.slice(-maxSamples);
+    }
+    if (this.analysisBuffer.length < maxSamples || this.analysisInFlight) {
+      return;
+    }
+
+    this.analysisInFlight = true;
+    const windowSamples = [...this.analysisBuffer];
+    const features = await this.analyzeWindow(windowSamples, sampleRate);
+    this.analysisInFlight = false;
 
     const normalized: SignalFrame = {
       sensor: "eeg",
@@ -109,22 +142,54 @@ export class MuseAthenaBluetoothProvider implements EegProvider {
         label: name,
         unit: "uV",
       })),
-      samples: eeg.samples,
-      timestampsMs: eeg.timestampsMs,
+      samples: windowSamples,
+      timestampsMs: eeg.timestampsMs?.slice(-windowSamples.length),
       receivedAtMs: frame.emittedAtMs,
-      sequenceId: frame.sequenceId,
+      sequenceId: ++this.emittedSequenceId,
       quality: {
         source: "inferred",
         excessiveArtifact: false,
         message: "Quality inferred from Web Bluetooth EEG stream",
       },
-      features: null,
+      features,
     };
 
     if (normalized.sequenceId <= 10 || normalized.sequenceId % 100 === 0) {
       console.log("[Normalized Web Bluetooth EEG frame]", normalized);
     }
     this.events.onSignalFrame(normalized);
+  }
+
+  private async analyzeWindow(
+    samples: number[][],
+    sampleRateHz: number,
+  ): Promise<SignalFeatures | null> {
+    try {
+      const response = await fetch(`${this.brainFlowServiceUrl}/analyze-window`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sampleRateHz, samples }),
+      });
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+
+      const payload = (await response.json()) as { features?: SignalFeatures | null };
+      this.analysisFailureReported = false;
+      return payload.features ?? null;
+    } catch (error) {
+      if (!this.analysisFailureReported) {
+        this.analysisFailureReported = true;
+        this.events.onError({
+          message:
+            error instanceof Error
+              ? `BrainFlow analysis unavailable for Web Bluetooth stream: ${error.message}`
+              : "BrainFlow analysis unavailable for Web Bluetooth stream.",
+          recoverable: true,
+        });
+      }
+      return null;
+    }
   }
 
   private publishDeviceInfo(transport: BleTransport | null, frame?: HeadbandFrameV1) {

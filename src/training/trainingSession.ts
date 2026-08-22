@@ -9,6 +9,12 @@ export interface TrainingTimelineEvent {
   label: string;
 }
 
+export interface TrainingStateMarker {
+  atMs: number;
+  label: string;
+  color: string;
+}
+
 export interface TrainingSessionSnapshot {
   state: TrainingSessionState;
   startedAtMs: number | null;
@@ -17,6 +23,7 @@ export interface TrainingSessionSnapshot {
   samples: AttentionMetricSample[];
   qualitySnapshots: HeadsetFitSnapshot[];
   timeline: TrainingTimelineEvent[];
+  stateMarkers: TrainingStateMarker[];
   deviceInfo: DeviceInfo | null;
 }
 
@@ -24,6 +31,18 @@ export interface TrainingPeriod {
   label: string;
   atMs: number;
   score: number;
+}
+
+export interface TrainingStateSummary {
+  label: string;
+  color: string;
+  startedAtMs: number;
+  endedAtMs: number;
+  durationMs: number;
+  sampleCount: number;
+  averageAttention: number | null;
+  minAttention: number | null;
+  maxAttention: number | null;
 }
 
 export interface TrainingSessionReport {
@@ -46,6 +65,8 @@ export interface TrainingSessionReport {
   }>;
   qualityTimeline: HeadsetFitSnapshot[];
   unreliablePeriods: TrainingPeriod[];
+  stateMarkers: TrainingStateMarker[];
+  stateSummaries: TrainingStateSummary[];
   signalQuality: {
     eegChannelCount: number;
     eegChannels: SignalChannel[];
@@ -63,6 +84,7 @@ export class TrainingSession {
   private samples: AttentionMetricSample[] = [];
   private qualitySnapshots: HeadsetFitSnapshot[] = [];
   private timeline: TrainingTimelineEvent[] = [];
+  private stateMarkers: TrainingStateMarker[] = [];
 
   constructor(private readonly getNow = () => performance.now()) {}
 
@@ -76,6 +98,7 @@ export class TrainingSession {
     this.samples = [];
     this.qualitySnapshots = [];
     this.timeline = [{ atMs: now, label: "Session started" }];
+    this.stateMarkers = [];
   }
 
   pause() {
@@ -124,6 +147,14 @@ export class TrainingSession {
     this.timeline.push({ atMs: this.getNow(), label });
   }
 
+  addStateMarker(label: string, color: string, atMs = this.getNow()) {
+    if (this.state === "idle" || this.state === "ended") return;
+
+    const now = this.getNow();
+    this.stateMarkers.push({ atMs, label, color });
+    this.timeline.push({ atMs: now, label: `State marked: ${label}` });
+  }
+
   addQualitySnapshot(snapshot: HeadsetFitSnapshot) {
     if (this.state !== "running") return;
 
@@ -142,6 +173,7 @@ export class TrainingSession {
       samples: [...this.samples],
       qualitySnapshots: [...this.qualitySnapshots],
       timeline: [...this.timeline],
+      stateMarkers: [...this.stateMarkers],
       deviceInfo,
     };
   }
@@ -173,6 +205,15 @@ export class TrainingSession {
       })),
       qualityTimeline: compactQualityTimeline(snapshot.qualitySnapshots),
       unreliablePeriods: pickUnreliablePeriods(snapshot.qualitySnapshots),
+      stateMarkers: snapshot.stateMarkers,
+      stateSummaries: summarizeStateMarkers(
+        snapshot.stateMarkers,
+        snapshot.samples,
+        snapshot.samples[snapshot.samples.length - 1]?.atMs ??
+          snapshot.stateMarkers[snapshot.stateMarkers.length - 1]?.atMs ??
+          snapshot.endedAtMs ??
+          this.getNow(),
+      ),
       signalQuality: {
         eegChannelCount: eegCapability?.channels.length ?? 0,
         eegChannels: eegCapability?.channels ?? [],
@@ -194,6 +235,33 @@ export class TrainingSession {
 
     return Math.max(0, end - this.startedAtMs - this.pausedDurationMs - currentPause);
   }
+}
+
+function summarizeStateMarkers(
+  markers: TrainingStateMarker[],
+  samples: AttentionMetricSample[],
+  fallbackEndMs: number,
+): TrainingStateSummary[] {
+  return markers.map((marker, index) => {
+    const nextMarker = markers[index + 1];
+    const endedAtMs = nextMarker?.atMs ?? fallbackEndMs;
+    const segmentSamples = samples.filter(
+      (sample) => sample.atMs >= marker.atMs && sample.atMs < endedAtMs,
+    );
+    const scores = segmentSamples.map((sample) => sample.displayedScore);
+
+    return {
+      label: marker.label,
+      color: marker.color,
+      startedAtMs: marker.atMs,
+      endedAtMs,
+      durationMs: Math.max(0, endedAtMs - marker.atMs),
+      sampleCount: scores.length,
+      averageAttention: scores.length ? average(scores) : null,
+      minAttention: scores.length ? Math.min(...scores) : null,
+      maxAttention: scores.length ? Math.max(...scores) : null,
+    };
+  });
 }
 
 function pickPeriods(

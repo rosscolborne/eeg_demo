@@ -110,28 +110,30 @@ export function HeadsetFitPanel({ fit, check, onRunCheck }: HeadsetFitPanelProps
         </div>
 
         <div className="fit-feedback">
-          <div className="fit-status-row">
-            <span>{isChecking ? "Check sample" : "Stable signal"}</span>
-            <strong>
-              {(isChecking || check.status === "complete"
-                ? checkProgressSeconds
-                : stableSeconds
-              ).toFixed(1)}s / {(fit.requiredStableMs / 1000).toFixed(1)}s
-            </strong>
-          </div>
-          <div className="fit-progress" aria-hidden="true">
-            <span
-              style={{
-                width: `${Math.min(
-                  100,
-                  ((isChecking || check.status === "complete"
-                    ? checkProgress
-                    : fit.stableForMs) /
-                    fit.requiredStableMs) *
+          <div className="fit-progress-block">
+            <div className="fit-status-row">
+              <span>{isChecking ? "Check sample" : "Stable signal"}</span>
+              <strong>
+                {(isChecking || check.status === "complete"
+                  ? checkProgressSeconds
+                  : stableSeconds
+                ).toFixed(1)}s / {(fit.requiredStableMs / 1000).toFixed(1)}s
+              </strong>
+            </div>
+            <div className="fit-progress" aria-hidden="true">
+              <span
+                style={{
+                  width: `${Math.min(
                     100,
-                )}%`,
-              }}
-            />
+                    ((isChecking || check.status === "complete"
+                      ? checkProgress
+                      : fit.stableForMs) /
+                      fit.requiredStableMs) *
+                      100,
+                  )}%`,
+                }}
+              />
+            </div>
           </div>
 
           <div

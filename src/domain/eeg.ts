@@ -47,6 +47,7 @@ export interface BandPowerFeatures {
 export interface SignalFeatures {
   bandPowers?: BandPowerFeatures | null;
   brainflowConcentration?: number | null;
+  brainflowRestfulness?: number | null;
 }
 
 export interface SensorCapability {

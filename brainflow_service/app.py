@@ -3,12 +3,20 @@ from __future__ import annotations
 import time
 from typing import Literal
 
+import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from .config import DEVICE_CONFIGS
+from .config import DEFAULT_PROCESSING, DEVICE_CONFIGS
+from .dsp import (
+    extract_band_power_features,
+    extract_brainflow_mindfulness,
+    extract_brainflow_restfulness,
+    preprocess_eeg_window,
+)
+from .models import SignalFeatures
 from .runtime import SessionStore, sse_event
 
 
@@ -27,6 +35,18 @@ class StartSessionResponse(BaseModel):
     state: Literal["connected"]
     device_info: dict = Field(alias="deviceInfo")
 
+
+class AnalyzeWindowRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    sample_rate_hz: float = Field(alias="sampleRateHz")
+    samples: list[list[float]]
+
+
+class AnalyzeWindowResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    features: SignalFeatures | None
 
 
 app = FastAPI(title="EEG Demo BrainFlow Service")
@@ -58,6 +78,37 @@ def devices() -> list[dict[str, str]]:
         }
         for config in DEVICE_CONFIGS.values()
     ]
+
+
+@app.post("/analyze-window")
+def analyze_window(request: AnalyzeWindowRequest) -> AnalyzeWindowResponse:
+    sample_rate = int(round(request.sample_rate_hz))
+    if sample_rate <= 0:
+        raise HTTPException(status_code=400, detail="sampleRateHz must be positive.")
+    if not request.samples:
+        raise HTTPException(status_code=400, detail="samples must not be empty.")
+
+    window = np.asarray(request.samples, dtype=float).T
+    if window.ndim != 2 or window.shape[0] == 0 or window.shape[1] == 0:
+        raise HTTPException(status_code=400, detail="samples must be row-major EEG values.")
+    if not np.isfinite(window).all():
+        raise HTTPException(status_code=400, detail="samples contain non-finite values.")
+
+    processed = preprocess_eeg_window(window, sample_rate, DEFAULT_PROCESSING)
+    band_powers = extract_band_power_features(processed, sample_rate)
+    brainflow_mindfulness = extract_brainflow_mindfulness(processed, sample_rate)
+    brainflow_restfulness = extract_brainflow_restfulness(processed, sample_rate)
+    features = (
+        SignalFeatures(
+            bandPowers=band_powers,
+            brainflowConcentration=brainflow_mindfulness,
+            brainflowRestfulness=brainflow_restfulness,
+        )
+        if band_powers or brainflow_mindfulness is not None or brainflow_restfulness is not None
+        else None
+    )
+
+    return AnalyzeWindowResponse(features=features).model_dump(by_alias=True)
 
 
 @app.post("/sessions")

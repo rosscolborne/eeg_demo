@@ -27,6 +27,7 @@ class SignalFeatures(BaseModel):
 
     band_powers: BandPowerFeatures | None = Field(default=None, alias="bandPowers")
     brainflow_concentration: float | None = Field(default=None, alias="brainflowConcentration")
+    brainflow_restfulness: float | None = Field(default=None, alias="brainflowRestfulness")
 
 
 class SignalQualityMetadata(BaseModel):

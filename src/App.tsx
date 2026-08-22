@@ -21,6 +21,8 @@ import {
   HeadsetFitPanel,
   type FitCheckState,
 } from "./components/quality/HeadsetFitPanel";
+import { AffectiveStatePanel } from "./components/AffectiveStatePanel";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { LiveEegPlot } from "./components/LiveEegPlot";
 import { TrainingSection } from "./components/training/TrainingSection";
 import {
@@ -42,6 +44,11 @@ import {
   HeuristicHeadsetFitProvider,
   type HeadsetFitSnapshot,
 } from "./signalQuality/headsetFitProvider";
+import {
+  AffectiveStateProvider,
+  type AffectiveCalibrationState,
+  type AffectiveStateSample,
+} from "./metrics/affectiveStateMetric";
 
 const maxHistorySamples = 640;
 const fitCheckDurationMs = 3500;
@@ -82,6 +89,7 @@ export default function App() {
   const providerRef = useRef<EegProvider | null>(null);
   const replayInputRef = useRef<HTMLInputElement | null>(null);
   const fitProviderRef = useRef(new HeuristicHeadsetFitProvider());
+  const affectiveProviderRef = useRef(new AffectiveStateProvider());
   const recordingFramesRef = useRef<SignalFrame[]>([]);
   const recordingActiveRef = useRef(false);
   const fitSnapshotRef = useRef<HeadsetFitSnapshot | null>(null);
@@ -100,6 +108,11 @@ export default function App() {
   const [providerLabel, setProviderLabel] = useState("");
   const [selectedDeviceId, setSelectedDeviceId] = useState("brainflow-muse-athena");
   const [latestFrame, setLatestFrame] = useState<SignalFrame | null>(null);
+  const [affectiveState, setAffectiveState] = useState<AffectiveStateSample | null>(null);
+  const [affectiveCalibration, setAffectiveCalibration] =
+    useState<AffectiveCalibrationState>(() =>
+      affectiveProviderRef.current.getCalibrationState(),
+    );
   const [recording, setRecording] = useState(false);
   const [recordedFrameCount, setRecordedFrameCount] = useState(0);
   const [fitSnapshot, setFitSnapshot] = useState<HeadsetFitSnapshot>(() =>
@@ -151,6 +164,8 @@ export default function App() {
 
         lastFrameArrivedAtRef.current = performance.now();
         setLatestFrame(frame);
+        setAffectiveState(affectiveProviderRef.current.pushFrame(frame, fitSnapshotRef.current));
+        setAffectiveCalibration(affectiveProviderRef.current.getCalibrationState());
         if (recordingActiveRef.current) {
           recordingFramesRef.current.push(frame);
           setRecordedFrameCount(recordingFramesRef.current.length);
@@ -186,6 +201,8 @@ export default function App() {
 
     providerRef.current = provider;
     fitProviderRef.current.reset();
+    affectiveProviderRef.current.reset();
+    setAffectiveCalibration(affectiveProviderRef.current.getCalibrationState());
     if (fitCheckTimeoutRef.current !== null) {
       window.clearTimeout(fitCheckTimeoutRef.current);
       fitCheckTimeoutRef.current = null;
@@ -200,6 +217,7 @@ export default function App() {
     setFrameCount(0);
     setPlotHistory({});
     setLatestFrame(null);
+    setAffectiveState(null);
     lastFrameArrivedAtRef.current = null;
     setRecording(false);
     recordingActiveRef.current = false;
@@ -241,6 +259,9 @@ export default function App() {
     setLatest({});
     setPlotHistory({});
     setLatestFrame(null);
+    setAffectiveState(null);
+    affectiveProviderRef.current.reset();
+    setAffectiveCalibration(affectiveProviderRef.current.getCalibrationState());
     lastFrameArrivedAtRef.current = null;
   }
 
@@ -412,6 +433,18 @@ export default function App() {
     URL.revokeObjectURL(url);
   }
 
+  function startAffectiveCalibration() {
+    affectiveProviderRef.current.startCalibration();
+    setAffectiveState(null);
+    setAffectiveCalibration(affectiveProviderRef.current.getCalibrationState());
+  }
+
+  function resetAffectiveCalibration() {
+    affectiveProviderRef.current.resetCalibration();
+    setAffectiveState(null);
+    setAffectiveCalibration(affectiveProviderRef.current.getCalibrationState());
+  }
+
   async function disconnect() {
     recordingActiveRef.current = false;
     setRecording(false);
@@ -434,9 +467,7 @@ export default function App() {
   return (
     <div className="app-frame">
       <aside className="sidebar" aria-label="Application navigation">
-        <div className="brand-mark" aria-label="EEG acquisition console">
-          <BrainCircuit aria-hidden="true" />
-        </div>
+        <div className="brand-mark" aria-label="EEG acquisition console" />
         <nav className="nav-stack">
           <button
             className={`nav-button ${view === "dashboard" ? "is-active" : ""}`}
@@ -449,16 +480,12 @@ export default function App() {
             className="nav-button"
             onClick={() => showDashboard("fit")}
             aria-label="Headset fit"
-          >
-            <Activity aria-hidden="true" />
-          </button>
+          />
           <button
             className="nav-button"
             onClick={() => showDashboard("chart")}
             aria-label="Live plot"
-          >
-            <LineChart aria-hidden="true" />
-          </button>
+          />
           <button
             className={`nav-button ${view === "training" ? "is-active" : ""}`}
             onClick={() => setView("training")}
@@ -470,9 +497,7 @@ export default function App() {
             className="nav-button"
             onClick={() => showDashboard("channels")}
             aria-label="EEG values"
-          >
-            <Rows3 aria-hidden="true" />
-          </button>
+          />
         </nav>
       </aside>
 
@@ -628,6 +653,13 @@ export default function App() {
           onRunCheck={runFitCheck}
         />
 
+        <AffectiveStatePanel
+          calibration={affectiveCalibration}
+          onCalibrate={startAffectiveCalibration}
+          onResetCalibration={resetAffectiveCalibration}
+          sample={affectiveState}
+        />
+
         <section id="chart" className="panel chart-card">
           <div className="panel-header">
             <div className="panel-title">
@@ -688,12 +720,14 @@ export default function App() {
         </section>
           </>
         ) : (
-          <TrainingSection
-            connectionState={state}
-            deviceInfo={deviceInfo}
-            latestFrame={latestFrame}
-            fit={fitSnapshot}
-          />
+          <ErrorBoundary label="Training">
+            <TrainingSection
+              connectionState={state}
+              deviceInfo={deviceInfo}
+              latestFrame={latestFrame}
+              fit={fitSnapshot}
+            />
+          </ErrorBoundary>
         )}
       </main>
     </div>
