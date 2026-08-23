@@ -123,6 +123,48 @@ def test_analyze_window_returns_brainflow_restfulness_for_frontend() -> None:
     assert 0 <= features["restfulnessScore"] <= 100
     assert 0 <= features["focusScore"] <= 100
     assert 0 <= features["relaxScore"] <= 100
+    assert -1 <= features["valence"] <= 1
+    assert -1 <= features["arousal"] <= 1
+    assert features["valence"] == features["rawValence"]
+    assert features["arousal"] == features["rawArousal"]
+    assert isinstance(features["stateLabel"], str)
+    assert 0 <= features["confidence"] <= 1
+    assert features["calibrationActive"] is False
+
+
+def test_calibration_endpoints_round_trip_for_a_session() -> None:
+    pytest.importorskip("brainflow")
+    pytest.importorskip("httpx")
+    from fastapi.testclient import TestClient
+
+    client = TestClient(app)
+    start_response = client.post(
+        "/sessions",
+        json={"deviceId": "brainflow-synthetic"},
+    )
+    assert start_response.status_code == 200
+    session_id = start_response.json()["sessionId"]
+
+    try:
+        idle_state = client.get(f"/sessions/{session_id}/calibration").json()
+        assert idle_state == {"status": "off", "progress": 0, "required": 24}
+
+        started_state = client.post(f"/sessions/{session_id}/calibration/start").json()
+        assert started_state["status"] == "collecting"
+
+        reset_state = client.post(f"/sessions/{session_id}/calibration/reset").json()
+        assert reset_state == {"status": "off", "progress": 0, "required": 24}
+    finally:
+        client.delete(f"/sessions/{session_id}")
+
+
+def test_calibration_endpoints_404_for_unknown_session() -> None:
+    pytest.importorskip("httpx")
+    from fastapi.testclient import TestClient
+
+    response = TestClient(app).get("/sessions/does-not-exist/calibration")
+
+    assert response.status_code == 404
 
 
 def test_brainflow_device_configs_include_live_and_synthetic() -> None:
@@ -172,6 +214,13 @@ async def collect_one_frame():
                 assert 0 <= frame.features.restfulness_score <= 100
                 assert 0 <= frame.features.focus_score <= 100
                 assert 0 <= frame.features.relax_score <= 100
+                assert frame.features.valence is not None
+                assert -1 <= frame.features.valence <= 1
+                assert frame.features.arousal is not None
+                assert -1 <= frame.features.arousal <= 1
+                assert frame.features.state_label is not None
+                assert frame.features.confidence is not None
+                assert 0 <= frame.features.confidence <= 1
                 return
     finally:
         session.stop()

@@ -40,6 +40,20 @@ class SignalFeatures(BaseModel):
     focus_score: int | None = Field(default=None, alias="focusScore")
     relax_score: int | None = Field(default=None, alias="relaxScore")
 
+    # Valence/arousal proxy, its raw (pre-smoothing, pre-calibration) values,
+    # nearest-label classification, and confidence. From `/analyze-window`
+    # `valence`/`arousal` equal the raw values (no session to smooth or
+    # calibrate across). From a session stream they carry smoothing and,
+    # once calibration is active, a baseline offset -- see
+    # `calibrationActive` and the `/sessions/{id}/calibration*` endpoints.
+    valence: float | None = None
+    arousal: float | None = None
+    raw_valence: float | None = Field(default=None, alias="rawValence")
+    raw_arousal: float | None = Field(default=None, alias="rawArousal")
+    state_label: str | None = Field(default=None, alias="stateLabel")
+    confidence: float | None = None
+    calibration_active: bool = Field(default=False, alias="calibrationActive")
+
 
 class SignalQualityMetadata(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -81,6 +95,18 @@ class SignalFrame(BaseModel):
     sequence_id: int = Field(alias="sequenceId")
     quality: SignalQualityMetadata | None = None
     features: SignalFeatures | None = None
+
+
+class AffectiveCalibrationStateResponse(BaseModel):
+    """Response for the `/sessions/{id}/calibration*` endpoints. Unrelated
+    to `CalibrationProfile` below, which is a different (training-feature)
+    baseline-ratio calibration."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    status: Literal["off", "collecting", "active"]
+    progress: int
+    required: int
 
 
 class CalibrationProfile(BaseModel):

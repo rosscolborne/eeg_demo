@@ -17,8 +17,9 @@ from .dsp import (
     extract_brainflow_restfulness,
     preprocess_eeg_window,
 )
+from .affective_state import compute_raw_affective_sample
 from .metrics import compute_neurofeedback_scores, normalize_brainflow_score
-from .models import SignalFeatures
+from .models import AffectiveCalibrationStateResponse, SignalFeatures
 from .runtime import SessionStore, sse_event
 
 
@@ -116,11 +117,18 @@ def analyze_window(request: AnalyzeWindowRequest) -> AnalyzeWindowResponse:
         # are single-window scores -- callers streaming a session should use
         # `/sessions/{id}/stream` instead, which returns the same finished
         # scores with the bundled app's EMA smoothing applied.
+        theta_power = band_powers.absolute.get("theta", 0.0) if band_powers else 0.0
+        alpha_power = band_powers.absolute.get("alpha", 0.0) if band_powers else 0.0
+        beta_power = band_powers.absolute.get("beta", 0.0) if band_powers else 0.0
+        gamma_power = band_powers.absolute.get("gamma", 0.0) if band_powers else 0.0
         neurofeedback = compute_neurofeedback_scores(
-            theta_power=band_powers.absolute.get("theta", 0.0) if band_powers else 0.0,
-            alpha_power=band_powers.absolute.get("alpha", 0.0) if band_powers else 0.0,
-            beta_power=band_powers.absolute.get("beta", 0.0) if band_powers else 0.0,
+            theta_power=theta_power,
+            alpha_power=alpha_power,
+            beta_power=beta_power,
         )
+        # No session here, so no smoothing/calibration to apply -- valence
+        # and arousal equal their raw values.
+        raw_affective = compute_raw_affective_sample(theta_power, alpha_power, beta_power, gamma_power)
         features = SignalFeatures(
             bandPowers=band_powers,
             brainflowConcentration=brainflow_mindfulness,
@@ -129,6 +137,13 @@ def analyze_window(request: AnalyzeWindowRequest) -> AnalyzeWindowResponse:
             restfulnessScore=normalize_brainflow_score(brainflow_restfulness),
             focusScore=neurofeedback.focus_score,
             relaxScore=neurofeedback.relax_score,
+            valence=raw_affective.valence if raw_affective else None,
+            arousal=raw_affective.arousal if raw_affective else None,
+            rawValence=raw_affective.valence if raw_affective else None,
+            rawArousal=raw_affective.arousal if raw_affective else None,
+            stateLabel=raw_affective.label if raw_affective else None,
+            confidence=raw_affective.confidence if raw_affective else None,
+            calibrationActive=False,
         )
 
     return AnalyzeWindowResponse(features=features).model_dump(by_alias=True)
@@ -171,12 +186,44 @@ def start_session(request: StartSessionRequest) -> StartSessionResponse:
     )
 
 
-@app.get("/sessions/{session_id}/stream")
-async def stream_session(session_id: str) -> StreamingResponse:
+@app.post("/sessions/{session_id}/calibration/start")
+def start_calibration(session_id: str) -> AffectiveCalibrationStateResponse:
+    session = _get_session_or_404(session_id)
+    session.start_calibration()
+    return _calibration_response(session)
+
+
+@app.post("/sessions/{session_id}/calibration/reset")
+def reset_calibration(session_id: str) -> AffectiveCalibrationStateResponse:
+    session = _get_session_or_404(session_id)
+    session.reset_calibration()
+    return _calibration_response(session)
+
+
+@app.get("/sessions/{session_id}/calibration")
+def get_calibration(session_id: str) -> AffectiveCalibrationStateResponse:
+    return _calibration_response(_get_session_or_404(session_id))
+
+
+def _get_session_or_404(session_id: str):
     try:
-        session = store.get(session_id)
+        return store.get(session_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Unknown BrainFlow session.") from exc
+
+
+def _calibration_response(session) -> AffectiveCalibrationStateResponse:
+    state = session.get_calibration_state()
+    return AffectiveCalibrationStateResponse(
+        status=state.status,
+        progress=state.progress,
+        required=state.required,
+    )
+
+
+@app.get("/sessions/{session_id}/stream")
+async def stream_session(session_id: str) -> StreamingResponse:
+    session = _get_session_or_404(session_id)
 
     async def events():
         yield sse_event("state", {"state": "streaming"})

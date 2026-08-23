@@ -31,9 +31,15 @@ Pipeline:
   bands, windowing, and processing parameters.
 - `brainflow_service/metrics.py`: mindfulness/restfulness/focus/relax scoring
   (a Python port of the smoothing math that used to live only in
-  `src/metrics/`). This is what lets a front-end other than the bundled React
-  app get the same four finished scores directly from the service's HTTP/SSE
-  API instead of reimplementing the scoring itself — see the README section
+  `src/metrics/`).
+- `brainflow_service/affective_state.py`: valence/arousal, its baseline
+  calibration, and nearest-label classification (a Python port of
+  `AffectiveStateProvider` in `src/metrics/affectiveStateMetric.ts`), built
+  on top of `metrics.py`'s `MindStateSmoother`.
+
+  Together these are what let a front-end other than the bundled React app
+  get the same finished scores directly from the service's HTTP/SSE API
+  instead of reimplementing the scoring itself — see the README section
   "Using this service from another front-end".
 
 ## BrainFlow APIs Used

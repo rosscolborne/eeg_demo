@@ -142,19 +142,44 @@ EEG_BRAINFLOW_CORS_ORIGINS=https://my-other-frontend.example.com uvicorn brainfl
 
 Two ways to get scores:
 
-- `POST /analyze-window` — stateless, single-window scores (no smoothing,
-  since there's no session to smooth across). Send `{ sampleRateHz, samples }`
-  where `samples` is row-major EEG values; the response's `features` object
-  carries the four scores plus raw band powers.
+- `POST /analyze-window` — stateless, single-window scores (no smoothing or
+  calibration, since there's no session to carry state across). Send
+  `{ sampleRateHz, samples }` where `samples` is row-major EEG values; the
+  response's `features` object carries the four headline scores, raw band
+  powers, and valence/arousal (`valence`/`arousal` equal `rawValence`/
+  `rawArousal` here, and `calibrationActive` is always `false`).
 - `GET /sessions/{id}/stream` (after `POST /sessions`) — an SSE stream of
   normalized `signalFrame` events. Each frame's `features` object carries the
-  same four scores, smoothed with the same slow EMA the bundled app displays,
-  so a live session needs no client-side scoring logic at all.
+  same scores with the slow EMA smoothing the bundled app applies, so a live
+  session needs no client-side scoring logic at all. `features` includes:
 
-The scoring logic itself (`brainflow_service/metrics.py`) is also usable
-directly as a library — `compute_neurofeedback_scores`, `MindStateSmoother` —
-if you want to embed it in your own Python backend instead of running this
-one as a service.
+  | Field | What it is |
+  |---|---|
+  | `mindfulnessScore`, `restfulnessScore` | 0-100, from BrainFlow's ML classifier; `null` if BrainFlow had no prediction for the window |
+  | `focusScore`, `relaxScore` | 0-100, from theta/alpha/beta band-power ratios |
+  | `valence`, `arousal` | -1 to 1 two-axis proxy, smoothed and (once active) baseline-calibrated |
+  | `rawValence`, `rawArousal` | the same axes before smoothing/calibration |
+  | `stateLabel` | nearest named region on the valence/arousal plane (e.g. `"Calm"`, `"Tense"`), or `"Neutral"` near the origin |
+  | `confidence` | 0-1, distance from the origin — how far from neutral the current reading is |
+  | `calibrationActive` | whether a calibration baseline is currently being subtracted from valence/arousal |
+
+  Calibration is controlled per session:
+  - `POST /sessions/{id}/calibration/start` — begin collecting a baseline (24 windows).
+  - `POST /sessions/{id}/calibration/reset` — clear the baseline and stop calibrating.
+  - `GET /sessions/{id}/calibration` — current `{ status, progress, required }`, where
+    `status` is `"off"`, `"collecting"`, or `"active"`.
+
+  Note: unlike the bundled React app, this service has no server-side signal
+  quality/artifact gating yet (that logic — `headsetFitProvider.ts` — is
+  browser-only and infers contact quality from raw sample variance). Scores
+  here are computed for every analyzable window regardless of headset fit.
+
+The scoring logic itself is also usable directly as a library if you want to
+embed it in your own Python backend instead of running this one as a
+service: `compute_neurofeedback_scores`/`MindStateSmoother` in
+`brainflow_service/metrics.py` for the four headline scores, or
+`AffectiveStateProvider` in `brainflow_service/affective_state.py` for the
+full set including valence/arousal and calibration.
 
 ## Run Checks
 

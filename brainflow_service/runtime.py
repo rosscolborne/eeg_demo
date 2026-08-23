@@ -17,7 +17,7 @@ from .dsp import (
     extract_brainflow_restfulness,
     preprocess_eeg_window,
 )
-from .metrics import MindStateSmoother
+from .affective_state import AffectiveCalibrationState, AffectiveStateProvider
 from .models import DeviceInfo, SensorCapability, SignalChannel, SignalFeatures, SignalFrame, SignalQualityMetadata
 
 
@@ -43,7 +43,16 @@ class BrainFlowSession:
         self.timestamp_channel: int | None = None
         self.device_info: DeviceInfo | None = None
         self._running = False
-        self._mind_state = MindStateSmoother()
+        self._affective_state = AffectiveStateProvider()
+
+    def start_calibration(self) -> None:
+        self._affective_state.start_calibration()
+
+    def reset_calibration(self) -> None:
+        self._affective_state.reset_calibration()
+
+    def get_calibration_state(self) -> AffectiveCalibrationState:
+        return self._affective_state.get_calibration_state()
 
     def prepare(self) -> DeviceInfo:
         from brainflow.board_shim import BoardIds, BrainFlowInputParams, BrainFlowPresets, BoardShim
@@ -153,10 +162,12 @@ class BrainFlowSession:
             brainflow_mindfulness = extract_brainflow_mindfulness(window, sample_rate)
             brainflow_restfulness = extract_brainflow_restfulness(window, sample_rate)
             if band_powers or brainflow_mindfulness is not None or brainflow_restfulness is not None:
-                mind_state = self._mind_state.push(
+                sample = self._affective_state.push(
+                    at_ms=time.time() * 1000.0,
                     theta_power=band_powers.absolute.get("theta", 0.0) if band_powers else 0.0,
                     alpha_power=band_powers.absolute.get("alpha", 0.0) if band_powers else 0.0,
                     beta_power=band_powers.absolute.get("beta", 0.0) if band_powers else 0.0,
+                    gamma_power=band_powers.absolute.get("gamma", 0.0) if band_powers else 0.0,
                     raw_mindfulness=brainflow_mindfulness,
                     raw_restfulness=brainflow_restfulness,
                 )
@@ -164,10 +175,17 @@ class BrainFlowSession:
                     bandPowers=band_powers,
                     brainflowConcentration=brainflow_mindfulness,
                     brainflowRestfulness=brainflow_restfulness,
-                    mindfulnessScore=mind_state.mindfulness_score,
-                    restfulnessScore=mind_state.restfulness_score,
-                    focusScore=mind_state.focus_score,
-                    relaxScore=mind_state.relax_score,
+                    mindfulnessScore=sample.mindfulness_score if sample else None,
+                    restfulnessScore=sample.restfulness_score if sample else None,
+                    focusScore=sample.focus_score if sample else None,
+                    relaxScore=sample.relax_score if sample else None,
+                    valence=sample.valence if sample else None,
+                    arousal=sample.arousal if sample else None,
+                    rawValence=sample.raw_valence if sample else None,
+                    rawArousal=sample.raw_arousal if sample else None,
+                    stateLabel=sample.label if sample else None,
+                    confidence=sample.confidence if sample else None,
+                    calibrationActive=sample.calibration_active if sample else False,
                 )
 
         return SignalFrame(

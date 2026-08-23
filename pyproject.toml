@@ -1,6 +1,6 @@
 [project]
 name = "eeg-demo-brainflow-service"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local BrainFlow acquisition and signal-processing bridge for the EEG demo."
 requires-python = ">=3.11"
 dependencies = [
