@@ -88,11 +88,12 @@ To replay:
 `brainflow_service` is a standalone Python package (own `pyproject.toml`, no
 dependency on the React app) that turns raw EEG into finished, display-ready
 scores — mindfulness, restfulness, focus, relax, a valence/arousal proxy
-with calibration, and a headset fit / signal quality assessment — so any
-front-end, in any language, can consume them without reimplementing the
-scoring itself. **For the full function/endpoint reference — what to call,
-what each field means — see [brainflow_service/README.md](brainflow_service/README.md).**
-This section covers install, run, and versioning.
+with calibration, a baseline-relative training score, and a headset fit /
+signal quality assessment — so any front-end, in any language, can consume
+them without reimplementing the scoring itself. **For the full
+function/endpoint reference — what to call, what each field means — see
+[brainflow_service/README.md](brainflow_service/README.md).** This section
+covers install, run, and versioning.
 
 Most consumers don't need to install anything: run this service as a
 standalone process and call it over HTTP/SSE from any language. If you're

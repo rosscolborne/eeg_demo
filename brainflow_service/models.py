@@ -115,6 +115,39 @@ class DeviceInfo(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class AttentionMetricSampleModel(BaseModel):
+    """Baseline-relative attention score, from
+    `brainflow_service/training.py`'s `AttentionBaselineProvider` -- the
+    Training feature's metric, distinct from the always-on headline scores
+    in `SignalFeatures`. Every score here is `null` until its own baseline
+    has enough samples with real spread to compute a z-score from (a brief
+    startup window, typically a few seconds) -- see `training.py`'s module
+    docstring for why there is no non-baseline fallback."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    displayed_score: float | None = Field(default=None, alias="displayedScore")
+    restfulness_score: float | None = Field(default=None, alias="restfulnessScore")
+    focus_score: float | None = Field(default=None, alias="focusScore")
+    relax_score: float | None = Field(default=None, alias="relaxScore")
+    raw_ratio: float = Field(alias="rawRatio")
+    baseline_ratio: float | None = Field(default=None, alias="baselineRatio")
+    raw_brainflow_mindfulness: float | None = Field(default=None, alias="rawBrainflowMindfulness")
+    baseline_brainflow_mindfulness: float | None = Field(default=None, alias="baselineBrainflowMindfulness")
+    baseline_relative_value: float | None = Field(default=None, alias="baselineRelativeValue")
+    baseline_z_score: float | None = Field(default=None, alias="baselineZScore")
+    raw_brainflow_restfulness: float | None = Field(default=None, alias="rawBrainflowRestfulness")
+    baseline_brainflow_restfulness: float | None = Field(default=None, alias="baselineBrainflowRestfulness")
+    restfulness_baseline_relative_value: float | None = Field(
+        default=None, alias="restfulnessBaselineRelativeValue",
+    )
+    restfulness_baseline_z_score: float | None = Field(default=None, alias="restfulnessBaselineZScore")
+    score_source: Literal["brainflow_mindfulness", "unavailable"] = Field(alias="scoreSource")
+    restfulness_score_source: Literal["brainflow_restfulness", "unavailable"] = Field(
+        alias="restfulnessScoreSource",
+    )
+
+
 class SignalFrame(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -127,6 +160,7 @@ class SignalFrame(BaseModel):
     sequence_id: int = Field(alias="sequenceId")
     quality: SignalQualityMetadata | None = None
     features: SignalFeatures | None = None
+    training: AttentionMetricSampleModel | None = None
 
 
 class AffectiveCalibrationStateResponse(BaseModel):
@@ -142,12 +176,27 @@ class AffectiveCalibrationStateResponse(BaseModel):
 
 
 class CalibrationProfile(BaseModel):
+    """The Training feature's locked-in baseline snapshot -- returned by
+    `GET /sessions/{id}/training/calibration-profile` once
+    `AttentionBaselineProvider`'s baseline has filled (metadata/diagnostics
+    only; it doesn't gate whether scores are being produced -- see
+    `training.py`)."""
+
     model_config = ConfigDict(populate_by_name=True)
 
     id: str
     algorithm_version: str = Field(alias="algorithmVersion")
     created_at_ms: float = Field(alias="createdAtMs")
     baseline_ratio: float | None = Field(alias="baselineRatio")
+    baseline_ratio_spread: float | None = Field(default=None, alias="baselineRatioSpread")
+    baseline_brainflow_mindfulness: float | None = Field(default=None, alias="baselineBrainflowMindfulness")
+    baseline_brainflow_mindfulness_spread: float | None = Field(
+        default=None, alias="baselineBrainflowMindfulnessSpread",
+    )
+    baseline_brainflow_restfulness: float | None = Field(default=None, alias="baselineBrainflowRestfulness")
+    baseline_brainflow_restfulness_spread: float | None = Field(
+        default=None, alias="baselineBrainflowRestfulnessSpread",
+    )
     accepted_windows: int = Field(alias="acceptedWindows")
     rejected_windows: int = Field(alias="rejectedWindows")
     rejection_reasons: dict[str, int] = Field(alias="rejectionReasons")

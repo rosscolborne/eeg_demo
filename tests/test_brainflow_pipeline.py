@@ -182,6 +182,18 @@ def test_calibration_endpoints_round_trip_for_a_session() -> None:
 
         reset_state = client.post(f"/sessions/{session_id}/calibration/reset").json()
         assert reset_state == {"status": "off", "progress": 0, "required": 24}
+
+        # Training's baseline-relative calibration profile is separate from
+        # the above and null until its baseline fills (exercised with a
+        # live streaming session in
+        # test_training_baseline_produces_scores_and_a_calibration_profile_once_filled).
+        # Checked here, sharing this test's session, rather than in its own
+        # test: BrainFlow's synthetic board can only successfully
+        # start_stream() once per process, so a second `POST /sessions` in
+        # the same pytest process reliably fails.
+        profile_response = client.get(f"/sessions/{session_id}/training/calibration-profile")
+        assert profile_response.status_code == 200
+        assert profile_response.json() is None
     finally:
         client.delete(f"/sessions/{session_id}")
 
@@ -252,6 +264,8 @@ async def collect_one_frame():
                 assert frame.quality is not None
                 assert frame.quality.state in ("poor", "adjusting", "good", "ready")
                 assert len(frame.quality.channels) == len(frame.channels)
+                assert frame.training is not None
+                assert isinstance(frame.training.raw_ratio, float)
                 return
     finally:
         session.stop()
@@ -267,3 +281,55 @@ asyncio.run(asyncio.wait_for(collect_one_frame(), timeout=5.0))
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_training_baseline_produces_scores_and_a_calibration_profile_once_filled() -> None:
+    pytest.importorskip("brainflow")
+
+    script = """
+import asyncio
+from brainflow_service.config import DEVICE_CONFIGS
+from brainflow_service.runtime import BrainFlowSession
+
+async def collect_until_baselined():
+    session = BrainFlowSession(DEVICE_CONFIGS["brainflow-synthetic"])
+    try:
+        session.prepare()
+        session.start()
+        async for frame in session.frames():
+            # displayed_score/focus_score/relax_score can turn non-null
+            # earlier (as soon as their own baseline has >=4 samples with
+            # real spread) -- the calibration profile specifically needs
+            # the ratio baseline to fill completely (24 windows).
+            profile = session.get_training_calibration_profile()
+            if profile is not None:
+                assert profile.algorithm_version == "median_mad_zscore_v1"
+                assert profile.accepted_windows == 24
+                assert frame.training is not None
+                assert 0 <= frame.training.displayed_score <= 100
+                assert 0 <= frame.training.focus_score <= 100
+                assert 0 <= frame.training.relax_score <= 100
+                return
+    finally:
+        session.stop()
+    raise AssertionError("Training baseline never filled")
+
+asyncio.run(asyncio.wait_for(collect_until_baselined(), timeout=15.0))
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_training_calibration_profile_endpoint_404_for_unknown_session() -> None:
+    pytest.importorskip("httpx")
+    from fastapi.testclient import TestClient
+
+    response = TestClient(app).get("/sessions/does-not-exist/training/calibration-profile")
+
+    assert response.status_code == 404

@@ -2,10 +2,16 @@
 
 A standalone Python package that turns raw EEG (via [BrainFlow](https://brainflow.org))
 into finished, display-ready scores: **mindfulness**, **restfulness**,
-**focus**, **relax**, a **valence/arousal** proxy with calibration, and a
-**headset fit / signal quality** assessment. It has no dependency on the
-bundled React app -- run it as an HTTP/SSE service and call it from any
-front-end, or import its modules directly into your own Python backend.
+**focus**, **relax**, a **valence/arousal** proxy with calibration, a
+**baseline-relative training score**, and a **headset fit / signal
+quality** assessment. It has no dependency on the bundled React app -- run
+it as an HTTP/SSE service and call it from any front-end, or import its
+modules directly into your own Python backend.
+
+Both calibrated features (valence/arousal, and training) use the same
+normalization strategy -- `baseline.py`'s median/MAD z-score, described
+below. There is intentionally only this one normalization approach in the
+package, not two.
 
 For install/versioning instructions and a front-end-facing quick start, see
 the [repo root README](../README.md#using-this-service-from-another-front-end).
@@ -16,12 +22,14 @@ exactly which functions/classes to call.
 
 ```
 raw EEG samples
-  -> dsp.py            preprocessing, band-power extraction, BrainFlow ML metrics
-  -> headset_fit.py     per-channel + overall signal quality
-  -> metrics.py          focus/relax + mindfulness/restfulness smoothing
-  -> affective_state.py  valence/arousal, calibration, state labelling
+  -> dsp.py             preprocessing, band-power extraction, BrainFlow ML metrics
+  -> headset_fit.py      per-channel + overall signal quality
+  -> baseline.py           shared median/MAD z-score normalization, used by both:
+  -> metrics.py              focus/relax + mindfulness/restfulness smoothing
+  -> affective_state.py      valence/arousal, calibration, state labelling
+  -> training.py              baseline-relative training score
   -> models.py           the pydantic response shapes above get returned as
-  -> app.py               ...over HTTP/SSE, via runtime.py's session/store
+  -> app.py                ...over HTTP/SSE, via runtime.py's session/store
 ```
 
 `app.py`/`runtime.py` are the only pieces that know about BrainFlow hardware
@@ -53,10 +61,12 @@ Python project.
 | `POST /sessions/{id}/calibration/start` | Begin collecting a valence/arousal baseline (24 windows). |
 | `POST /sessions/{id}/calibration/reset` | Clear the baseline and stop calibrating. |
 | `GET /sessions/{id}/calibration` | Current `{status, progress, required}` (`status`: `"off"` \| `"collecting"` \| `"active"`). |
+| `GET /sessions/{id}/training/calibration-profile` | The Training feature's baseline snapshot (`CalibrationProfile`), or `null` until it fills. Collection starts automatically -- there's no start/reset control here. |
 
-`features` (a `SignalFeatures`) and `quality` (a `SignalQualityMetadata`) are
-the two objects everything below produces. Field-by-field descriptions are
-in `models.py`'s docstrings/comments and the root README's endpoint table.
+`features` (a `SignalFeatures`), `quality` (a `SignalQualityMetadata`), and
+each SSE `signalFrame`'s `training` (an `AttentionMetricSampleModel`) are
+the objects everything below produces. Field-by-field descriptions are in
+`models.py`'s docstrings/comments and the root README's endpoint table.
 
 ## Using it as a library
 
@@ -87,7 +97,29 @@ their own internal filtering).
 | `smooth_score(current, target, weight)` | you're maintaining your own EMA state | smoothed `float` |
 | `MindStateSmoother(smoothing_alpha=0.05)` | a **session** (repeated windows over time) and want all four headline scores smoothed the way the bundled app displays them | instantiate once per session; call `.push(theta_power=, alpha_power=, beta_power=, raw_mindfulness=, raw_restfulness=)` each window, returns `MindStateScores`; call `.reset()` to clear |
 
-### `affective_state.py` -- valence/arousal, calibration, state labelling (built on `metrics.py`)
+### `baseline.py` -- shared robust baseline normalization (pure math, no dependencies)
+
+The one normalization strategy used everywhere a raw value gets compared
+against a rolling baseline: collect up to `sample_count` values, compute a
+**median center and MAD-based spread** (robust to outliers -- unlike a raw
+mean/stddev, a few noisy windows don't distort the baseline), then map new
+values to a z-score and squash that through `tanh`.
+
+| Function/class | Call it when you have... | Returns |
+|---|---|---|
+| `median(values)` | a list of floats | `float` |
+| `compute_robust_stats(values)` | a baseline's collected values | `RobustStats(center, spread) \| None` -- `None` if fewer than 4 values, or the baseline has no real spread (e.g. constant input) |
+| `z_score(value, stats)` | a value and `RobustStats` (or `None`) | `float \| None` |
+| `map_z_score_to_score(z, scale=1.5)` | a z-score, want a 0-100 score centered at 50 | `float \| None` |
+| `BaselineCollector(sample_count=24)` | accumulating a baseline over a session | `.accept(value)`, `.median()`, `.stats()`, `.is_full`, `.collected`, `.reset()` -- collection freezes once full, matching the TS behavior of a fixed (not sliding) baseline window |
+
+`affective_state.py` and `training.py` both build on this rather than each
+having their own baseline math (the bundled app's own `attentionMetric.ts`
+and `affectiveStateMetric.ts` currently don't -- the latter still uses a
+simpler, less robust flat-offset calibration; this package intentionally
+doesn't carry that forward).
+
+### `affective_state.py` -- valence/arousal, calibration, state labelling (built on `metrics.py` and `baseline.py`)
 
 | Function/class | Call it when you have... | Returns |
 |---|---|---|
@@ -96,7 +128,7 @@ their own internal filtering).
 | `estimate_confidence(valence, arousal, quality_factor=1.0)` | a valence/arousal point (and optionally `confidence_quality_factor(fit)`) | `float`, 0-1 |
 | `confidence_quality_factor(fit: FitQualityHint \| None)` | a `headset_fit.HeadsetFitSnapshot`'s `ready`/`state`, wrapped in a `FitQualityHint` | `float` multiplier for `estimate_confidence` |
 | `compute_raw_affective_sample(theta_power, alpha_power, beta_power, gamma_power)` | band powers for **one window, no session** | `RawAffectiveSample \| None` (unsmoothed valence/arousal/label/confidence) |
-| `AffectiveStateProvider(smoothing_alpha=0.05, calibration_sample_count=24)` | a **session** and want the full set (valence/arousal + the four headline scores, smoothed and calibrated) | see below |
+| `AffectiveStateProvider(smoothing_alpha=0.05, calibration_sample_count=24, z_score_scale=1.5)` | a **session** and want the full set (valence/arousal + the four headline scores, smoothed and calibrated) | see below |
 
 `AffectiveStateProvider` is the one class most integrations want for a live
 session -- it wraps `MindStateSmoother` internally, so a single call gives
@@ -121,6 +153,45 @@ sample = provider.push(
 provider.get_calibration_state()   # -> AffectiveCalibrationState(status, progress, required)
 provider.reset_calibration()
 provider.reset()                   # clears everything, including the internal MindStateSmoother
+```
+
+Once calibration is active, `valence`/`arousal` are the raw axis' z-score
+against the collected baseline (via `baseline.py`), mapped back into
+`-1..1` with `tanh` -- not a flat `raw - median` offset. A perfectly flat
+baseline (zero spread) never activates calibration; it just keeps
+collecting, since `compute_robust_stats` returns `None` for that case
+rather than a degenerate near-zero spread.
+
+### `training.py` -- baseline-relative attention scoring, for the Training feature (built on `metrics.py` and `baseline.py`)
+
+Answers a different question from `AffectiveStateProvider`: not "what's the
+live score" but "relative to this session's own baseline, is it higher or
+lower right now". Every score is `null` until its own baseline has enough
+samples with real spread (typically a few seconds) -- there's no raw/
+unbaselined fallback mode.
+
+| Function/class | Call it when you have... | Returns |
+|---|---|---|
+| `AttentionBaselineProvider(smoothing_alpha=0.05, baseline_sample_count=24, z_score_scale=1.5)` | a **session** and want baseline-relative mindfulness/restfulness/focus/relax | instantiate once per session |
+| `.push(at_ms=, theta_power=, alpha_power=, beta_power=, raw_mindfulness=, raw_restfulness=, reliable=True)` | one window | `AttentionMetricSample \| None` |
+| `.get_calibration_profile()` | want the locked-in baseline snapshot | `AttentionCalibrationProfile \| None` -- non-`None` once the ratio baseline fills (24 windows); diagnostic metadata, doesn't gate scoring |
+| `.reset()` | starting a new session | clears everything |
+| `to_attention_metric_sample_model(sample)` / `to_calibration_profile_model(profile)` | converting to the pydantic shapes used on the wire | `AttentionMetricSampleModel` / `CalibrationProfile` |
+
+Baseline collection starts automatically from the first pushed window --
+unlike `AffectiveStateProvider`'s calibration, there's no explicit start/
+reset call.
+
+```python
+from brainflow_service.training import AttentionBaselineProvider
+
+provider = AttentionBaselineProvider()
+sample = provider.push(
+    at_ms=..., theta_power=..., alpha_power=..., beta_power=...,
+    raw_mindfulness=..., raw_restfulness=...,
+)
+# sample.displayed_score, .restfulness_score, .focus_score, .relax_score  (each nullable)
+# sample.baseline_z_score, .baseline_relative_value  -- diagnostics
 ```
 
 ### `headset_fit.py` -- signal quality / headset fit (pure math, no dependencies)
@@ -151,7 +222,7 @@ can't demonstrate. This is exactly what `/analyze-window` does.
 
 | Class | Use it for |
 |---|---|
-| `BrainFlowSession(config, mac_address=None, serial_number=None, processing=DEFAULT_PROCESSING)` | Owns one BoardShim session end-to-end: `.prepare()` connects and returns `DeviceInfo`, `.start()` begins streaming, `.frames()` is an async generator of normalized `SignalFrame`s (each already scored via its own internal `AffectiveStateProvider` + `HeuristicHeadsetFitProvider`), `.stop()` releases it. Also exposes `.start_calibration()`, `.reset_calibration()`, `.get_calibration_state()`. |
+| `BrainFlowSession(config, mac_address=None, serial_number=None, processing=DEFAULT_PROCESSING)` | Owns one BoardShim session end-to-end: `.prepare()` connects and returns `DeviceInfo`, `.start()` begins streaming, `.frames()` is an async generator of normalized `SignalFrame`s (each already scored via its own internal `AffectiveStateProvider` + `HeuristicHeadsetFitProvider` + `AttentionBaselineProvider`), `.stop()` releases it. Also exposes `.start_calibration()`, `.reset_calibration()`, `.get_calibration_state()`, `.get_training_calibration_profile()`. |
 | `SessionStore()` | In-memory registry of active sessions, used by `app.py`: `.create(device_id, **kwargs)`, `.get(session_id)`, `.stop(session_id)`, `.stop_all()`. |
 
 If you want the raw hardware pipeline without running the HTTP service, use
@@ -185,7 +256,8 @@ asyncio.run(main())
 
 `SignalFrame`, `SignalFeatures`, `SignalQualityMetadata`,
 `ChannelSignalQualityModel`, `DeviceInfo`, `AffectiveCalibrationStateResponse`,
-etc. These are what `app.py` serializes over HTTP/SSE (`by_alias=True`, so
+`AttentionMetricSampleModel`, `CalibrationProfile` (the Training feature's
+baseline snapshot), etc. These are what `app.py` serializes over HTTP/SSE (`by_alias=True`, so
 JSON keys are camelCase even though the Python attributes are snake_case).
 If you're consuming the HTTP API directly you mostly don't need to import
 these; if you're embedding this package in another Python service, they're
@@ -195,8 +267,9 @@ the types your code will pass around.
 
 - **"I have a live BrainFlow board and want scored frames"** -> `runtime.BrainFlowSession`, or just run the service and consume `/sessions/{id}/stream`.
 - **"I have one window of raw samples and just want scores, no session"** -> `dsp.extract_band_power_features` + `metrics.compute_neurofeedback_scores` + `affective_state.compute_raw_affective_sample`, or just call `POST /analyze-window`.
-- **"I already have band powers from somewhere else and just want the scoring math"** -> `metrics.py`/`affective_state.py` have no BrainFlow or hardware dependency; call them directly.
+- **"I already have band powers from somewhere else and just want the scoring math"** -> `metrics.py`/`affective_state.py`/`training.py`/`baseline.py` have no BrainFlow or hardware dependency; call them directly.
 - **"I want to know if the headset is worn well enough to trust readings"** -> `headset_fit.HeuristicHeadsetFitProvider`.
+- **"I want a session-relative training score, not just the live one"** -> `training.AttentionBaselineProvider`, or `GET /sessions/{id}/training/calibration-profile` for its baseline snapshot.
 
 ## Tests
 

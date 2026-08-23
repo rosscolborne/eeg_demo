@@ -19,7 +19,8 @@ from .dsp import (
 )
 from .affective_state import AffectiveCalibrationState, AffectiveStateProvider, FitQualityHint
 from .headset_fit import HeuristicHeadsetFitProvider, to_signal_quality_metadata
-from .models import DeviceInfo, SensorCapability, SignalChannel, SignalFeatures, SignalFrame
+from .models import CalibrationProfile, DeviceInfo, SensorCapability, SignalChannel, SignalFeatures, SignalFrame
+from .training import AttentionBaselineProvider, to_attention_metric_sample_model, to_calibration_profile_model
 
 
 class BrainFlowSession:
@@ -46,6 +47,7 @@ class BrainFlowSession:
         self._running = False
         self._affective_state = AffectiveStateProvider()
         self._headset_fit = HeuristicHeadsetFitProvider()
+        self._attention = AttentionBaselineProvider()
 
     def start_calibration(self) -> None:
         self._affective_state.start_calibration()
@@ -55,6 +57,10 @@ class BrainFlowSession:
 
     def get_calibration_state(self) -> AffectiveCalibrationState:
         return self._affective_state.get_calibration_state()
+
+    def get_training_calibration_profile(self) -> CalibrationProfile | None:
+        profile = self._attention.get_calibration_profile()
+        return to_calibration_profile_model(profile) if profile else None
 
     def prepare(self) -> DeviceInfo:
         from brainflow.board_shim import BoardIds, BrainFlowInputParams, BrainFlowPresets, BoardShim
@@ -163,6 +169,7 @@ class BrainFlowSession:
 
         window = build_eeg_window(data, self.eeg_channels, window_samples)
         features = None
+        training_sample = None
         if window is not None:
             processed = preprocess_eeg_window(window, sample_rate, self.processing)
             band_powers = extract_band_power_features(processed, sample_rate)
@@ -173,12 +180,16 @@ class BrainFlowSession:
                 # return null` gate and its confidence quality factor, using
                 # this session's real headset-fit assessment instead of
                 # always assuming full reliability.
+                theta_power = band_powers.absolute.get("theta", 0.0) if band_powers else 0.0
+                alpha_power = band_powers.absolute.get("alpha", 0.0) if band_powers else 0.0
+                beta_power = band_powers.absolute.get("beta", 0.0) if band_powers else 0.0
+                gamma_power = band_powers.absolute.get("gamma", 0.0) if band_powers else 0.0
                 sample = self._affective_state.push(
                     at_ms=time.time() * 1000.0,
-                    theta_power=band_powers.absolute.get("theta", 0.0) if band_powers else 0.0,
-                    alpha_power=band_powers.absolute.get("alpha", 0.0) if band_powers else 0.0,
-                    beta_power=band_powers.absolute.get("beta", 0.0) if band_powers else 0.0,
-                    gamma_power=band_powers.absolute.get("gamma", 0.0) if band_powers else 0.0,
+                    theta_power=theta_power,
+                    alpha_power=alpha_power,
+                    beta_power=beta_power,
+                    gamma_power=gamma_power,
                     raw_mindfulness=brainflow_mindfulness,
                     raw_restfulness=brainflow_restfulness,
                     reliable=not fit_snapshot.excessive_artifact,
@@ -201,6 +212,17 @@ class BrainFlowSession:
                     calibrationActive=sample.calibration_active if sample else False,
                 )
 
+                attention = self._attention.push(
+                    at_ms=time.time() * 1000.0,
+                    theta_power=theta_power,
+                    alpha_power=alpha_power,
+                    beta_power=beta_power,
+                    raw_mindfulness=brainflow_mindfulness,
+                    raw_restfulness=brainflow_restfulness,
+                    reliable=not fit_snapshot.excessive_artifact,
+                )
+                training_sample = to_attention_metric_sample_model(attention) if attention else None
+
         return SignalFrame(
             sensor="eeg",
             sampleRateHz=sample_rate,
@@ -209,6 +231,7 @@ class BrainFlowSession:
             timestampsMs=timestamps_ms,
             receivedAtMs=time.time() * 1000.0,
             sequenceId=self.sequence_id,
+            training=training_sample,
             quality=quality,
             features=features,
         )

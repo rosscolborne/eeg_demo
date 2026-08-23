@@ -22,6 +22,7 @@ from .headset_fit import HeuristicHeadsetFitProvider, to_signal_quality_metadata
 from .metrics import compute_neurofeedback_scores, normalize_brainflow_score
 from .models import (
     AffectiveCalibrationStateResponse,
+    CalibrationProfile,
     SignalChannel,
     SignalFeatures,
     SignalQualityMetadata,
@@ -233,6 +234,15 @@ def reset_calibration(session_id: str) -> AffectiveCalibrationStateResponse:
 @app.get("/sessions/{session_id}/calibration")
 def get_calibration(session_id: str) -> AffectiveCalibrationStateResponse:
     return _calibration_response(_get_session_or_404(session_id))
+
+
+@app.get("/sessions/{session_id}/training/calibration-profile")
+def get_training_calibration_profile(session_id: str) -> CalibrationProfile | None:
+    # Training's baseline (brainflow_service/training.py) collects
+    # automatically from the session's first window -- there's no
+    # start/reset control the way valence/arousal calibration above has.
+    # This is null until the baseline fills (typically a few seconds).
+    return _get_session_or_404(session_id).get_training_calibration_profile()
 
 
 def _get_session_or_404(session_id: str):

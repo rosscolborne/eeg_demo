@@ -36,10 +36,20 @@ Pipeline:
 - `brainflow_service/metrics.py`: mindfulness/restfulness/focus/relax scoring
   (a Python port of the smoothing math that used to live only in
   `src/metrics/`).
+- `brainflow_service/baseline.py`: shared median/MAD z-score baseline
+  normalization -- the more robust of the two calibration strategies the
+  bundled app has (`attentionMetric.ts`'s, vs. `affectiveStateMetric.ts`'s
+  simpler flat-offset one). Used by both modules below; the service
+  intentionally carries forward only this one, not both.
 - `brainflow_service/affective_state.py`: valence/arousal, its baseline
-  calibration, and nearest-label classification (a Python port of
-  `AffectiveStateProvider` in `src/metrics/affectiveStateMetric.ts`), built
-  on top of `metrics.py`'s `MindStateSmoother`.
+  calibration (via `baseline.py`, not the TS version's flat offset), and
+  nearest-label classification (a Python port of `AffectiveStateProvider`
+  in `src/metrics/affectiveStateMetric.ts`), built on top of `metrics.py`'s
+  `MindStateSmoother`.
+- `brainflow_service/training.py`: baseline-relative mindfulness/
+  restfulness/focus/relax, for the Training feature (a Python port of
+  `HeuristicAttentionProvider` in `src/metrics/attentionMetric.ts`, minus
+  its non-baselined `direct` display mode -- see the module's docstring).
 
   Together with `headset_fit.py` above, these are what let a front-end
   other than the bundled React app get the same finished, quality-gated
