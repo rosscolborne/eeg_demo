@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from typing import Literal
 
@@ -16,6 +17,7 @@ from .dsp import (
     extract_brainflow_restfulness,
     preprocess_eeg_window,
 )
+from .metrics import compute_neurofeedback_scores, normalize_brainflow_score
 from .models import SignalFeatures
 from .runtime import SessionStore, sse_event
 
@@ -52,9 +54,19 @@ class AnalyzeWindowResponse(BaseModel):
 app = FastAPI(title="EEG Demo BrainFlow Service")
 store = SessionStore()
 
+# Additional origins (comma-separated) that may call this service, on top of
+# the bundled app's own localhost dev ports. Set this so a different
+# front-end -- served from another host/port -- can reach the API, e.g.:
+#   EEG_BRAINFLOW_CORS_ORIGINS=https://my-other-frontend.example.com
+_extra_cors_origins = [
+    origin.strip()
+    for origin in os.environ.get("EEG_BRAINFLOW_CORS_ORIGINS", "").split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173", *_extra_cors_origins],
     allow_origin_regex=r"http://(127\.0\.0\.1|localhost):517[0-9]",
     allow_credentials=False,
     allow_methods=["*"],
@@ -98,15 +110,26 @@ def analyze_window(request: AnalyzeWindowRequest) -> AnalyzeWindowResponse:
     band_powers = extract_band_power_features(processed, sample_rate)
     brainflow_mindfulness = extract_brainflow_mindfulness(window, sample_rate)
     brainflow_restfulness = extract_brainflow_restfulness(window, sample_rate)
-    features = (
-        SignalFeatures(
+    features = None
+    if band_powers or brainflow_mindfulness is not None or brainflow_restfulness is not None:
+        # This endpoint is stateless (no session to smooth across), so these
+        # are single-window scores -- callers streaming a session should use
+        # `/sessions/{id}/stream` instead, which returns the same finished
+        # scores with the bundled app's EMA smoothing applied.
+        neurofeedback = compute_neurofeedback_scores(
+            theta_power=band_powers.absolute.get("theta", 0.0) if band_powers else 0.0,
+            alpha_power=band_powers.absolute.get("alpha", 0.0) if band_powers else 0.0,
+            beta_power=band_powers.absolute.get("beta", 0.0) if band_powers else 0.0,
+        )
+        features = SignalFeatures(
             bandPowers=band_powers,
             brainflowConcentration=brainflow_mindfulness,
             brainflowRestfulness=brainflow_restfulness,
+            mindfulnessScore=normalize_brainflow_score(brainflow_mindfulness),
+            restfulnessScore=normalize_brainflow_score(brainflow_restfulness),
+            focusScore=neurofeedback.focus_score,
+            relaxScore=neurofeedback.relax_score,
         )
-        if band_powers or brainflow_mindfulness is not None or brainflow_restfulness is not None
-        else None
-    )
 
     return AnalyzeWindowResponse(features=features).model_dump(by_alias=True)
 

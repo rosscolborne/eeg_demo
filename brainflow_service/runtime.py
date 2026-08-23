@@ -17,6 +17,7 @@ from .dsp import (
     extract_brainflow_restfulness,
     preprocess_eeg_window,
 )
+from .metrics import MindStateSmoother
 from .models import DeviceInfo, SensorCapability, SignalChannel, SignalFeatures, SignalFrame, SignalQualityMetadata
 
 
@@ -42,6 +43,7 @@ class BrainFlowSession:
         self.timestamp_channel: int | None = None
         self.device_info: DeviceInfo | None = None
         self._running = False
+        self._mind_state = MindStateSmoother()
 
     def prepare(self) -> DeviceInfo:
         from brainflow.board_shim import BoardIds, BrainFlowInputParams, BrainFlowPresets, BoardShim
@@ -151,10 +153,21 @@ class BrainFlowSession:
             brainflow_mindfulness = extract_brainflow_mindfulness(window, sample_rate)
             brainflow_restfulness = extract_brainflow_restfulness(window, sample_rate)
             if band_powers or brainflow_mindfulness is not None or brainflow_restfulness is not None:
+                mind_state = self._mind_state.push(
+                    theta_power=band_powers.absolute.get("theta", 0.0) if band_powers else 0.0,
+                    alpha_power=band_powers.absolute.get("alpha", 0.0) if band_powers else 0.0,
+                    beta_power=band_powers.absolute.get("beta", 0.0) if band_powers else 0.0,
+                    raw_mindfulness=brainflow_mindfulness,
+                    raw_restfulness=brainflow_restfulness,
+                )
                 features = SignalFeatures(
                     bandPowers=band_powers,
                     brainflowConcentration=brainflow_mindfulness,
                     brainflowRestfulness=brainflow_restfulness,
+                    mindfulnessScore=mind_state.mindfulness_score,
+                    restfulnessScore=mind_state.restfulness_score,
+                    focusScore=mind_state.focus_score,
+                    relaxScore=mind_state.relax_score,
                 )
 
         return SignalFrame(

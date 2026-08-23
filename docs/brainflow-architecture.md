@@ -29,6 +29,12 @@ Pipeline:
 - `src/providers/brainflowHttpProvider.ts`: frontend HTTP/SSE adapter.
 - `brainflow_service/config.py`: board IDs, Muse Athena startup options, frequency
   bands, windowing, and processing parameters.
+- `brainflow_service/metrics.py`: mindfulness/restfulness/focus/relax scoring
+  (a Python port of the smoothing math that used to live only in
+  `src/metrics/`). This is what lets a front-end other than the bundled React
+  app get the same four finished scores directly from the service's HTTP/SSE
+  API instead of reimplementing the scoring itself — see the README section
+  "Using this service from another front-end".
 
 ## BrainFlow APIs Used
 

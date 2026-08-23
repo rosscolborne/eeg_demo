@@ -83,6 +83,79 @@ To replay:
 2. Click `Upload File`.
 3. Choose a downloaded app JSON recording.
 
+## Using This Service From Another Front-End
+
+`brainflow_service` is a standalone Python package (own `pyproject.toml`, no
+dependency on the React app) that computes four finished, display-ready
+scores per window — `mindfulnessScore`, `restfulnessScore`, `focusScore`,
+`relaxScore`, all 0-100 — so any front-end, in any language, can consume them
+without reimplementing the scoring itself.
+
+Most consumers don't need to install anything: run this service as a
+standalone process and call it over HTTP/SSE from any language (see below).
+If you're embedding the scoring code directly into another **Python**
+backend instead, install it from GitHub with `uv` or `pip`, pinned to a
+release tag:
+
+```bash
+uv add "git+https://github.com/rosscolborne/eeg_demo.git@v0.1.0#subdirectory=brainflow_service"
+```
+
+```bash
+pip install "git+https://github.com/rosscolborne/eeg_demo.git@v0.1.0#subdirectory=brainflow_service"
+```
+
+### Releasing a new version
+
+`pyproject.toml`'s `version` field is the source of truth. To cut a release:
+
+1. Bump `version` in [pyproject.toml](pyproject.toml).
+2. Commit, then tag to match and push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+
+### Updating to a new version
+
+A git dependency pinned to a tag (`@v0.1.0`) is a fixed, reproducible
+target — pushing new commits or new tags to this repo does **not** affect
+consumers already installed, and plain `uv sync` will never fetch a newer
+tag on its own. To move to a new release, the consumer changes which tag
+they depend on and re-resolves:
+
+```bash
+uv add "git+https://github.com/rosscolborne/eeg_demo.git@vX.Y.Z#subdirectory=brainflow_service"
+```
+
+(This is a deliberate action on their end, not something that happens
+automatically — that's the point of pinning to a tag rather than `main`.)
+
+Then run it as a service (it's a FastAPI app; run it with any ASGI server):
+
+```bash
+uvicorn brainflow_service.app:app --host 0.0.0.0 --port 8000
+```
+
+By default CORS only allows the bundled app's own `localhost:517x` dev ports.
+To allow a different front-end's origin, set:
+
+```bash
+EEG_BRAINFLOW_CORS_ORIGINS=https://my-other-frontend.example.com uvicorn brainflow_service.app:app --port 8000
+```
+
+Two ways to get scores:
+
+- `POST /analyze-window` — stateless, single-window scores (no smoothing,
+  since there's no session to smooth across). Send `{ sampleRateHz, samples }`
+  where `samples` is row-major EEG values; the response's `features` object
+  carries the four scores plus raw band powers.
+- `GET /sessions/{id}/stream` (after `POST /sessions`) — an SSE stream of
+  normalized `signalFrame` events. Each frame's `features` object carries the
+  same four scores, smoothed with the same slow EMA the bundled app displays,
+  so a live session needs no client-side scoring logic at all.
+
+The scoring logic itself (`brainflow_service/metrics.py`) is also usable
+directly as a library — `compute_neurofeedback_scores`, `MindStateSmoother` —
+if you want to embed it in your own Python backend instead of running this
+one as a service.
+
 ## Run Checks
 
 Build the frontend:

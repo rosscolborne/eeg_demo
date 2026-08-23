@@ -29,6 +29,17 @@ class SignalFeatures(BaseModel):
     brainflow_concentration: float | None = Field(default=None, alias="brainflowConcentration")
     brainflow_restfulness: float | None = Field(default=None, alias="brainflowRestfulness")
 
+    # Finished, display-ready 0-100 scores. From `/analyze-window` these are
+    # instantaneous (no smoothing, since that endpoint is stateless). From a
+    # `/sessions/{id}/stream` SSE feed these carry the same slow-EMA
+    # smoothing the bundled frontend applies, so a consumer needs no
+    # client-side scoring logic at all. mindfulness/restfulness are null
+    # when BrainFlow's classifier had no usable prediction for the window.
+    mindfulness_score: float | None = Field(default=None, alias="mindfulnessScore")
+    restfulness_score: float | None = Field(default=None, alias="restfulnessScore")
+    focus_score: int | None = Field(default=None, alias="focusScore")
+    relax_score: int | None = Field(default=None, alias="relaxScore")
+
 
 class SignalQualityMetadata(BaseModel):
     model_config = ConfigDict(populate_by_name=True)

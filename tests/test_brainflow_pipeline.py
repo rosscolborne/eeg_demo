@@ -119,6 +119,10 @@ def test_analyze_window_returns_brainflow_restfulness_for_frontend() -> None:
     assert features["brainflowConcentration"] is not None
     assert features["brainflowRestfulness"] is not None
     assert 0 <= features["brainflowRestfulness"] <= 1
+    assert 0 <= features["mindfulnessScore"] <= 100
+    assert 0 <= features["restfulnessScore"] <= 100
+    assert 0 <= features["focusScore"] <= 100
+    assert 0 <= features["relaxScore"] <= 100
 
 
 def test_brainflow_device_configs_include_live_and_synthetic() -> None:
@@ -162,6 +166,12 @@ async def collect_one_frame():
                 assert 0 <= frame.features.brainflow_concentration <= 1
                 assert frame.features.brainflow_restfulness is not None
                 assert 0 <= frame.features.brainflow_restfulness <= 1
+                assert frame.features.mindfulness_score is not None
+                assert 0 <= frame.features.mindfulness_score <= 100
+                assert frame.features.restfulness_score is not None
+                assert 0 <= frame.features.restfulness_score <= 100
+                assert 0 <= frame.features.focus_score <= 100
+                assert 0 <= frame.features.relax_score <= 100
                 return
     finally:
         session.stop()
