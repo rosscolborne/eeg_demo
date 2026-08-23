@@ -17,8 +17,9 @@ from .dsp import (
     extract_brainflow_restfulness,
     preprocess_eeg_window,
 )
-from .affective_state import AffectiveCalibrationState, AffectiveStateProvider
-from .models import DeviceInfo, SensorCapability, SignalChannel, SignalFeatures, SignalFrame, SignalQualityMetadata
+from .affective_state import AffectiveCalibrationState, AffectiveStateProvider, FitQualityHint
+from .headset_fit import HeuristicHeadsetFitProvider, to_signal_quality_metadata
+from .models import DeviceInfo, SensorCapability, SignalChannel, SignalFeatures, SignalFrame
 
 
 class BrainFlowSession:
@@ -44,6 +45,7 @@ class BrainFlowSession:
         self.device_info: DeviceInfo | None = None
         self._running = False
         self._affective_state = AffectiveStateProvider()
+        self._headset_fit = HeuristicHeadsetFitProvider()
 
     def start_calibration(self) -> None:
         self._affective_state.start_calibration()
@@ -150,9 +152,14 @@ class BrainFlowSession:
 
         self.sequence_id += 1
         eeg_rows = data[np.array(self.eeg_channels), :].T
+        eeg_samples = eeg_rows.astype(float).tolist()
         timestamps_ms = None
         if self.timestamp_channel is not None and self.timestamp_channel < data.shape[0]:
             timestamps_ms = (data[self.timestamp_channel, :] * 1000.0).astype(float).tolist()
+
+        channels = self.device_info.capabilities[0].channels
+        fit_snapshot = self._headset_fit.update(channels=channels, samples=eeg_samples)
+        quality = to_signal_quality_metadata(fit_snapshot)
 
         window = build_eeg_window(data, self.eeg_channels, window_samples)
         features = None
@@ -162,6 +169,10 @@ class BrainFlowSession:
             brainflow_mindfulness = extract_brainflow_mindfulness(window, sample_rate)
             brainflow_restfulness = extract_brainflow_restfulness(window, sample_rate)
             if band_powers or brainflow_mindfulness is not None or brainflow_restfulness is not None:
+                # Mirrors AffectiveStateProvider's `if (quality?.excessiveArtifact)
+                # return null` gate and its confidence quality factor, using
+                # this session's real headset-fit assessment instead of
+                # always assuming full reliability.
                 sample = self._affective_state.push(
                     at_ms=time.time() * 1000.0,
                     theta_power=band_powers.absolute.get("theta", 0.0) if band_powers else 0.0,
@@ -170,6 +181,8 @@ class BrainFlowSession:
                     gamma_power=band_powers.absolute.get("gamma", 0.0) if band_powers else 0.0,
                     raw_mindfulness=brainflow_mindfulness,
                     raw_restfulness=brainflow_restfulness,
+                    reliable=not fit_snapshot.excessive_artifact,
+                    fit=FitQualityHint(ready=fit_snapshot.ready, state=fit_snapshot.state),
                 )
                 features = SignalFeatures(
                     bandPowers=band_powers,
@@ -191,16 +204,12 @@ class BrainFlowSession:
         return SignalFrame(
             sensor="eeg",
             sampleRateHz=sample_rate,
-            channels=self.device_info.capabilities[0].channels,
-            samples=eeg_rows.astype(float).tolist(),
+            channels=channels,
+            samples=eeg_samples,
             timestampsMs=timestamps_ms,
             receivedAtMs=time.time() * 1000.0,
             sequenceId=self.sequence_id,
-            quality=SignalQualityMetadata(
-                source="inferred",
-                excessiveArtifact=False,
-                message="Quality inferred from BrainFlow EEG stream",
-            ),
+            quality=quality,
             features=features,
         )
 

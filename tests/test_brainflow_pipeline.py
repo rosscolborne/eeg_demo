@@ -131,6 +131,34 @@ def test_analyze_window_returns_brainflow_restfulness_for_frontend() -> None:
     assert 0 <= features["confidence"] <= 1
     assert features["calibrationActive"] is False
 
+    quality = response.json()["quality"]
+    assert quality["state"] in ("poor", "adjusting", "good", "ready")
+    assert quality["ready"] is False  # a single window can never demonstrate sustained contact
+    assert len(quality["channels"]) == 4
+
+
+def test_analyze_window_withholds_derived_scores_for_noisy_window() -> None:
+    pytest.importorskip("brainflow")
+    pytest.importorskip("httpx")
+    from fastapi.testclient import TestClient
+
+    # Alternating +/-5000 steps trip the excessive-artifact gate.
+    samples = [[5000.0, 5000.0, 5000.0, 5000.0] if i % 2 == 0 else [-5000.0, -5000.0, -5000.0, -5000.0] for i in range(1024)]
+    response = TestClient(app).post(
+        "/analyze-window",
+        json={"sampleRateHz": 256, "samples": samples},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["quality"]["excessiveArtifact"] is True
+    features = body["features"]
+    assert features["mindfulnessScore"] is None
+    assert features["focusScore"] is None
+    assert features["valence"] is None
+    # Raw band powers are still reported even when derived scores are withheld.
+    assert features["bandPowers"] is not None
+
 
 def test_calibration_endpoints_round_trip_for_a_session() -> None:
     pytest.importorskip("brainflow")
@@ -221,6 +249,9 @@ async def collect_one_frame():
                 assert frame.features.state_label is not None
                 assert frame.features.confidence is not None
                 assert 0 <= frame.features.confidence <= 1
+                assert frame.quality is not None
+                assert frame.quality.state in ("poor", "adjusting", "good", "ready")
+                assert len(frame.quality.channels) == len(frame.channels)
                 return
     finally:
         session.stop()

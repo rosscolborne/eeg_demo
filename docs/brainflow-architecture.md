@@ -20,6 +20,10 @@ Pipeline:
 - `src/metrics/attentionMetric.ts`: Focus Index metric interface and current heuristic.
 - `src/training/trainingSession.ts`: session/report lifecycle.
 - `src/signalQuality/headsetFitProvider.ts`: inferred quality gate from normalized frames.
+- `brainflow_service/headset_fit.py`: server-side port of the above --
+  per-channel and overall signal quality inferred from raw sample
+  statistics, used to gate the mindfulness/restfulness/focus/relax/
+  valence/arousal scores below on real signal quality.
 
 ## BrainFlow-Specific Pieces
 
@@ -37,10 +41,12 @@ Pipeline:
   `AffectiveStateProvider` in `src/metrics/affectiveStateMetric.ts`), built
   on top of `metrics.py`'s `MindStateSmoother`.
 
-  Together these are what let a front-end other than the bundled React app
-  get the same finished scores directly from the service's HTTP/SSE API
-  instead of reimplementing the scoring itself — see the README section
-  "Using this service from another front-end".
+  Together with `headset_fit.py` above, these are what let a front-end
+  other than the bundled React app get the same finished, quality-gated
+  scores directly from the service's HTTP/SSE API instead of
+  reimplementing the scoring itself — see
+  [brainflow_service/README.md](../brainflow_service/README.md) for the
+  full function/endpoint reference.
 
 ## BrainFlow APIs Used
 

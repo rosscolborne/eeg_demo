@@ -55,6 +55,25 @@ class SignalFeatures(BaseModel):
     calibration_active: bool = Field(default=False, alias="calibrationActive")
 
 
+class ChannelSignalQualityModel(BaseModel):
+    """Per-channel signal-quality breakdown, from
+    `brainflow_service/headset_fit.py`."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    channel: SignalChannel
+    state: Literal["poor", "adjusting", "good"]
+    score: float
+    rms_uv: float = Field(alias="rmsUv")
+    std_dev_uv: float = Field(alias="stdDevUv")
+    peak_to_peak_uv: float = Field(alias="peakToPeakUv")
+    mean_step_uv: float = Field(alias="meanStepUv")
+    max_abs_uv: float = Field(alias="maxAbsUv")
+    max_step_uv: float = Field(alias="maxStepUv")
+    clipped_fraction: float = Field(alias="clippedFraction")
+    message: str
+
+
 class SignalQualityMetadata(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -62,6 +81,19 @@ class SignalQualityMetadata(BaseModel):
     excessive_artifact: bool = Field(default=False, alias="excessiveArtifact")
     motion_rms: float | None = Field(default=None, alias="motionRms")
     message: str | None = None
+
+    # Headset fit / contact-quality assessment (brainflow_service/headset_fit.py).
+    # `state`/`ready` are null/false until enough EEG samples have been seen
+    # to assess; a session stream's `ready` only turns true after
+    # `requiredStableMs` of sustained good contact, so a single
+    # `/analyze-window` call always reports `ready: false`.
+    state: Literal["poor", "adjusting", "good", "ready"] | None = None
+    ready: bool = False
+    worn: bool = False
+    blockers: list[str] = Field(default_factory=list)
+    channels: list[ChannelSignalQualityModel] = Field(default_factory=list)
+    stable_for_ms: float | None = Field(default=None, alias="stableForMs")
+    required_stable_ms: float | None = Field(default=None, alias="requiredStableMs")
 
 
 class SensorCapability(BaseModel):

@@ -86,16 +86,18 @@ To replay:
 ## Using This Service From Another Front-End
 
 `brainflow_service` is a standalone Python package (own `pyproject.toml`, no
-dependency on the React app) that computes four finished, display-ready
-scores per window — `mindfulnessScore`, `restfulnessScore`, `focusScore`,
-`relaxScore`, all 0-100 — so any front-end, in any language, can consume them
-without reimplementing the scoring itself.
+dependency on the React app) that turns raw EEG into finished, display-ready
+scores — mindfulness, restfulness, focus, relax, a valence/arousal proxy
+with calibration, and a headset fit / signal quality assessment — so any
+front-end, in any language, can consume them without reimplementing the
+scoring itself. **For the full function/endpoint reference — what to call,
+what each field means — see [brainflow_service/README.md](brainflow_service/README.md).**
+This section covers install, run, and versioning.
 
 Most consumers don't need to install anything: run this service as a
-standalone process and call it over HTTP/SSE from any language (see below).
-If you're embedding the scoring code directly into another **Python**
-backend instead, install it from GitHub with `uv` or `pip`, pinned to a
-release tag:
+standalone process and call it over HTTP/SSE from any language. If you're
+embedding the scoring code directly into another **Python** backend instead,
+install it from GitHub with `uv` or `pip`, pinned to a release tag:
 
 ```bash
 uv add "git+https://github.com/rosscolborne/eeg_demo.git@v0.1.0#subdirectory=brainflow_service"
@@ -140,46 +142,14 @@ To allow a different front-end's origin, set:
 EEG_BRAINFLOW_CORS_ORIGINS=https://my-other-frontend.example.com uvicorn brainflow_service.app:app --port 8000
 ```
 
-Two ways to get scores:
-
-- `POST /analyze-window` — stateless, single-window scores (no smoothing or
-  calibration, since there's no session to carry state across). Send
-  `{ sampleRateHz, samples }` where `samples` is row-major EEG values; the
-  response's `features` object carries the four headline scores, raw band
-  powers, and valence/arousal (`valence`/`arousal` equal `rawValence`/
-  `rawArousal` here, and `calibrationActive` is always `false`).
-- `GET /sessions/{id}/stream` (after `POST /sessions`) — an SSE stream of
-  normalized `signalFrame` events. Each frame's `features` object carries the
-  same scores with the slow EMA smoothing the bundled app applies, so a live
-  session needs no client-side scoring logic at all. `features` includes:
-
-  | Field | What it is |
-  |---|---|
-  | `mindfulnessScore`, `restfulnessScore` | 0-100, from BrainFlow's ML classifier; `null` if BrainFlow had no prediction for the window |
-  | `focusScore`, `relaxScore` | 0-100, from theta/alpha/beta band-power ratios |
-  | `valence`, `arousal` | -1 to 1 two-axis proxy, smoothed and (once active) baseline-calibrated |
-  | `rawValence`, `rawArousal` | the same axes before smoothing/calibration |
-  | `stateLabel` | nearest named region on the valence/arousal plane (e.g. `"Calm"`, `"Tense"`), or `"Neutral"` near the origin |
-  | `confidence` | 0-1, distance from the origin — how far from neutral the current reading is |
-  | `calibrationActive` | whether a calibration baseline is currently being subtracted from valence/arousal |
-
-  Calibration is controlled per session:
-  - `POST /sessions/{id}/calibration/start` — begin collecting a baseline (24 windows).
-  - `POST /sessions/{id}/calibration/reset` — clear the baseline and stop calibrating.
-  - `GET /sessions/{id}/calibration` — current `{ status, progress, required }`, where
-    `status` is `"off"`, `"collecting"`, or `"active"`.
-
-  Note: unlike the bundled React app, this service has no server-side signal
-  quality/artifact gating yet (that logic — `headsetFitProvider.ts` — is
-  browser-only and infers contact quality from raw sample variance). Scores
-  here are computed for every analyzable window regardless of headset fit.
-
-The scoring logic itself is also usable directly as a library if you want to
-embed it in your own Python backend instead of running this one as a
-service: `compute_neurofeedback_scores`/`MindStateSmoother` in
-`brainflow_service/metrics.py` for the four headline scores, or
-`AffectiveStateProvider` in `brainflow_service/affective_state.py` for the
-full set including valence/arousal and calibration.
+Two entry points: `POST /analyze-window` for a stateless, single-window
+score (no smoothing/calibration — there's no session to carry state across),
+and `POST /sessions` + `GET /sessions/{id}/stream` for a live SSE feed of
+smoothed, calibrated scores with signal-quality gating. See
+[brainflow_service/README.md](brainflow_service/README.md) for the full
+endpoint table, field reference, and — if you're embedding this in another
+Python backend instead of running it as a service — the module-by-module
+function reference for calling the scoring code directly.
 
 ## Run Checks
 

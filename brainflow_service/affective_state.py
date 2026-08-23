@@ -6,11 +6,13 @@ two-axis valence/arousal proxy, its baseline calibration, and nearest-label
 classification, so a session carries the full set of scores the bundled
 app's "Valence / Arousal" panel shows -- not just the four headline scores.
 
-Deviation from the TS version: `estimate_confidence` there also factors in
-a browser-only headset-fit "quality" signal (`headsetFitProvider.ts`) that
-has no server-side equivalent yet, so confidence here is distance-based
-only. `AffectiveStateProvider.push` accepts an optional `reliable` flag if
-a caller wants to wire in their own artifact/contact gating later.
+`AffectiveStateProvider.push` accepts `reliable` and `fit` so a caller can
+wire in real quality gating -- `brainflow_service/runtime.py` does this with
+`headset_fit.py`'s `HeuristicHeadsetFitProvider`, matching the TS version's
+`if (quality?.excessiveArtifact) return null` gate and its confidence
+`qualityFactor`. Both default to "no quality signal available" (always
+reliable, full-confidence) for callers that don't have a fit assessment to
+hand, e.g. the stateless `/analyze-window` endpoint.
 """
 
 from __future__ import annotations
@@ -78,6 +80,31 @@ class AffectiveStateSample:
 
 
 @dataclass(frozen=True)
+class FitQualityHint:
+    """Minimal view of a `headset_fit.HeadsetFitSnapshot` needed for the
+    confidence calculation -- avoids a hard dependency on `headset_fit.py`
+    for callers that don't have (or want) a fit assessment."""
+
+    ready: bool
+    state: str | None
+
+
+def confidence_quality_factor(fit: FitQualityHint | None) -> float:
+    """Port of the `qualityFactor` term in `estimateConfidence` (TS).
+    `fit=None` means "no quality signal available" and returns 1.0 (full
+    confidence, i.e. distance-only) rather than the TS default of 0.45 --
+    that default only exists in the browser to handle a race before the
+    first headset-fit snapshot exists, which doesn't apply here."""
+    if fit is None:
+        return 1.0
+    if fit.ready:
+        return 1.0
+    if fit.state == "good":
+        return 0.75
+    return 0.45
+
+
+@dataclass(frozen=True)
 class RawAffectiveSample:
     """Single-window valence/arousal with no smoothing or calibration --
     used by the stateless `/analyze-window` endpoint."""
@@ -111,11 +138,12 @@ def classify_affective_state(valence: float, arousal: float) -> str:
     return nearest.label
 
 
-def estimate_confidence(valence: float, arousal: float) -> float:
-    """Distance-based port of `estimateConfidence`. See module docstring for
-    why the quality-factor multiplier from the TS version isn't included."""
+def estimate_confidence(valence: float, arousal: float, quality_factor: float = 1.0) -> float:
+    """Port of `estimateConfidence`. Pass `confidence_quality_factor(fit)`
+    for `quality_factor` to fold in a real headset-fit assessment; the
+    default (1.0) is distance-only."""
     distance = min(1.0, math.hypot(valence, arousal))
-    return _clamp(distance, 0.0, 1.0)
+    return _clamp(distance * quality_factor, 0.0, 1.0)
 
 
 def compute_raw_affective_sample(
@@ -214,6 +242,7 @@ class AffectiveStateProvider:
         raw_mindfulness: float | None,
         raw_restfulness: float | None,
         reliable: bool = True,
+        fit: FitQualityHint | None = None,
     ) -> AffectiveStateSample | None:
         if not reliable:
             return None
@@ -270,7 +299,7 @@ class AffectiveStateProvider:
             raw_arousal=raw_arousal,
             calibration_active=self._calibration_profile is not None,
             label=classify_affective_state(valence, arousal),
-            confidence=estimate_confidence(valence, arousal),
+            confidence=estimate_confidence(valence, arousal, confidence_quality_factor(fit)),
             theta_power=theta,
             alpha_power=alpha,
             beta_power=beta,

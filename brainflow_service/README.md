@@ -1,0 +1,210 @@
+# brainflow_service
+
+A standalone Python package that turns raw EEG (via [BrainFlow](https://brainflow.org))
+into finished, display-ready scores: **mindfulness**, **restfulness**,
+**focus**, **relax**, a **valence/arousal** proxy with calibration, and a
+**headset fit / signal quality** assessment. It has no dependency on the
+bundled React app -- run it as an HTTP/SSE service and call it from any
+front-end, or import its modules directly into your own Python backend.
+
+For install/versioning instructions and a front-end-facing quick start, see
+the [repo root README](../README.md#using-this-service-from-another-front-end).
+This document is the module-by-module reference: what each file does and
+exactly which functions/classes to call.
+
+## Pipeline at a glance
+
+```
+raw EEG samples
+  -> dsp.py            preprocessing, band-power extraction, BrainFlow ML metrics
+  -> headset_fit.py     per-channel + overall signal quality
+  -> metrics.py          focus/relax + mindfulness/restfulness smoothing
+  -> affective_state.py  valence/arousal, calibration, state labelling
+  -> models.py           the pydantic response shapes above get returned as
+  -> app.py               ...over HTTP/SSE, via runtime.py's session/store
+```
+
+`app.py`/`runtime.py` are the only pieces that know about BrainFlow hardware
+sessions or HTTP. Everything else is plain, dependency-light scoring math you
+can call directly.
+
+## Running it as a service
+
+```bash
+uv sync
+uv run uvicorn brainflow_service.app:app --host 0.0.0.0 --port 8000
+```
+
+Set `EEG_BRAINFLOW_CORS_ORIGINS` (comma-separated) to allow a front-end
+running on a different origin; see the root README for the full install/run
+walkthrough, including installing this package from GitHub into another
+Python project.
+
+### HTTP/SSE endpoints (`app.py`)
+
+| Endpoint | What it does |
+|---|---|
+| `GET /health` | Liveness check. |
+| `GET /devices` | Lists configured BrainFlow devices (`config.DEVICE_CONFIGS`). |
+| `POST /analyze-window` | Stateless: score one raw EEG window. No smoothing/calibration/stability (there's no session to hold that state). Body: `{sampleRateHz, samples}` (`samples` row-major: one inner list per time sample, across channels). Returns `{features, quality}`. |
+| `POST /sessions` | Starts a live BrainFlow board session. Body: `{deviceId, macAddress?, serialNumber?}`. Returns `{sessionId, state, deviceInfo}`. |
+| `GET /sessions/{id}/stream` | Server-Sent Events stream of normalized `signalFrame` events (each with smoothed/calibrated `features` and `quality`), plus `state` and `error` events. |
+| `DELETE /sessions/{id}` | Stops and releases a session. |
+| `POST /sessions/{id}/calibration/start` | Begin collecting a valence/arousal baseline (24 windows). |
+| `POST /sessions/{id}/calibration/reset` | Clear the baseline and stop calibrating. |
+| `GET /sessions/{id}/calibration` | Current `{status, progress, required}` (`status`: `"off"` \| `"collecting"` \| `"active"`). |
+
+`features` (a `SignalFeatures`) and `quality` (a `SignalQualityMetadata`) are
+the two objects everything below produces. Field-by-field descriptions are
+in `models.py`'s docstrings/comments and the root README's endpoint table.
+
+## Using it as a library
+
+Each module below is independently importable and has no BrainFlow/hardware
+dependency unless noted.
+
+### `dsp.py` -- preprocessing and feature extraction (needs `brainflow`, falls back gracefully if it's missing)
+
+| Function | Call it when you have... | Returns |
+|---|---|---|
+| `build_eeg_window(data, eeg_channels, samples)` | a raw BoardShim `(channels, samples)` array and want the last N samples for just the EEG channels | `np.ndarray \| None` |
+| `preprocess_eeg_window(window, sampling_rate, config=DEFAULT_PROCESSING)` | a raw EEG window and want it detrended + bandpass/notch filtered | filtered `np.ndarray` |
+| `extract_band_power_features(window, sampling_rate, bands=DEFAULT_BANDS)` | a preprocessed window and want delta/theta/alpha/beta/gamma power | `BandPowerFeatures \| None` (absolute, relative, ratios) |
+| `extract_brainflow_mindfulness(window, sampling_rate)` | a **raw, unfiltered** window and want BrainFlow's native mindfulness classifier score | `float \| None`, 0-1 |
+| `extract_brainflow_restfulness(window, sampling_rate)` | same, for restfulness | `float \| None`, 0-1 |
+
+`extract_brainflow_mindfulness`/`restfulness` must be called with the raw
+window, not the output of `preprocess_eeg_window` -- see the docstring on
+`extract_brainflow_mental_state` for why (BrainFlow's classifiers expect
+their own internal filtering).
+
+### `metrics.py` -- focus/relax and mindfulness/restfulness scoring (pure math, no dependencies)
+
+| Function/class | Call it when you have... | Returns |
+|---|---|---|
+| `compute_neurofeedback_scores(theta_power, alpha_power, beta_power)` | band powers for one window and want focus/relax | `NeurofeedbackScores` (0-100 scores + signed pre-score values) |
+| `normalize_brainflow_score(value)` | a raw 0-1 BrainFlow mindfulness/restfulness value and want it as 0-100 | `float \| None` |
+| `smooth_score(current, target, weight)` | you're maintaining your own EMA state | smoothed `float` |
+| `MindStateSmoother(smoothing_alpha=0.05)` | a **session** (repeated windows over time) and want all four headline scores smoothed the way the bundled app displays them | instantiate once per session; call `.push(theta_power=, alpha_power=, beta_power=, raw_mindfulness=, raw_restfulness=)` each window, returns `MindStateScores`; call `.reset()` to clear |
+
+### `affective_state.py` -- valence/arousal, calibration, state labelling (built on `metrics.py`)
+
+| Function/class | Call it when you have... | Returns |
+|---|---|---|
+| `map_ratio_to_axis(ratio)` | a band-power ratio and want it mapped to a -1..1 axis | `float` |
+| `classify_affective_state(valence, arousal)` | a valence/arousal point and want the nearest named region (`"Calm"`, `"Tense"`, ..., or `"Neutral"` near the origin) | `str` |
+| `estimate_confidence(valence, arousal, quality_factor=1.0)` | a valence/arousal point (and optionally `confidence_quality_factor(fit)`) | `float`, 0-1 |
+| `confidence_quality_factor(fit: FitQualityHint \| None)` | a `headset_fit.HeadsetFitSnapshot`'s `ready`/`state`, wrapped in a `FitQualityHint` | `float` multiplier for `estimate_confidence` |
+| `compute_raw_affective_sample(theta_power, alpha_power, beta_power, gamma_power)` | band powers for **one window, no session** | `RawAffectiveSample \| None` (unsmoothed valence/arousal/label/confidence) |
+| `AffectiveStateProvider(smoothing_alpha=0.05, calibration_sample_count=24)` | a **session** and want the full set (valence/arousal + the four headline scores, smoothed and calibrated) | see below |
+
+`AffectiveStateProvider` is the one class most integrations want for a live
+session -- it wraps `MindStateSmoother` internally, so a single call gives
+you everything:
+
+```python
+from brainflow_service.affective_state import AffectiveStateProvider, FitQualityHint
+
+provider = AffectiveStateProvider()
+provider.start_calibration()          # optional; collects a 24-window baseline
+
+sample = provider.push(
+    at_ms=..., theta_power=..., alpha_power=..., beta_power=..., gamma_power=...,
+    raw_mindfulness=...,               # from dsp.extract_brainflow_mindfulness, or None
+    raw_restfulness=...,               # from dsp.extract_brainflow_restfulness, or None
+    reliable=True,                     # False (e.g. from a headset_fit excessive_artifact) skips this window
+    fit=FitQualityHint(ready=..., state=...),  # optional, folds real signal quality into confidence
+)
+# sample.valence, .arousal, .label, .confidence, .calibration_active,
+# .mindfulness_score, .restfulness_score, .focus_score, .relax_score
+
+provider.get_calibration_state()   # -> AffectiveCalibrationState(status, progress, required)
+provider.reset_calibration()
+provider.reset()                   # clears everything, including the internal MindStateSmoother
+```
+
+### `headset_fit.py` -- signal quality / headset fit (pure math, no dependencies)
+
+| Function/class | Call it when you have... | Returns |
+|---|---|---|
+| `HeuristicHeadsetFitProvider(thresholds=DEFAULT_HEADSET_FIT_THRESHOLDS)` | a **session** and want per-channel + overall fit quality, including a stability timer | instantiate once per session |
+| `.update(channels=, samples=, now_ms=None)` | one window's channel list + raw samples | `HeadsetFitSnapshot` (`state`, `ready`, `worn`, `excessive_artifact`, `blockers`, per-channel `channels`, `stable_for_ms`) |
+| `.reset()` | starting a new session/fit check | clears the stability timer |
+| `to_signal_quality_metadata(snapshot)` | a `HeadsetFitSnapshot` and want the pydantic `SignalQualityMetadata` used on the wire | `SignalQualityMetadata` |
+
+```python
+from brainflow_service.headset_fit import HeuristicHeadsetFitProvider
+
+fit_provider = HeuristicHeadsetFitProvider()
+snapshot = fit_provider.update(channels=device_channels, samples=eeg_window_samples)
+# snapshot.state: "poor" | "adjusting" | "good" | "ready"
+# snapshot.excessive_artifact -> feed into AffectiveStateProvider.push(reliable=...)
+# snapshot.ready / snapshot.state -> feed into FitQualityHint for confidence
+```
+
+For a **single, stateless** assessment (no session), just use a fresh
+instance -- `ready` will always be `False` since readiness requires
+sustained good contact over `thresholds.stable_ready_ms`, which one window
+can't demonstrate. This is exactly what `/analyze-window` does.
+
+### `runtime.py` -- BrainFlow session lifecycle and HTTP/SSE wiring (needs `brainflow`)
+
+| Class | Use it for |
+|---|---|
+| `BrainFlowSession(config, mac_address=None, serial_number=None, processing=DEFAULT_PROCESSING)` | Owns one BoardShim session end-to-end: `.prepare()` connects and returns `DeviceInfo`, `.start()` begins streaming, `.frames()` is an async generator of normalized `SignalFrame`s (each already scored via its own internal `AffectiveStateProvider` + `HeuristicHeadsetFitProvider`), `.stop()` releases it. Also exposes `.start_calibration()`, `.reset_calibration()`, `.get_calibration_state()`. |
+| `SessionStore()` | In-memory registry of active sessions, used by `app.py`: `.create(device_id, **kwargs)`, `.get(session_id)`, `.stop(session_id)`, `.stop_all()`. |
+
+If you want the raw hardware pipeline without running the HTTP service, use
+`BrainFlowSession` directly:
+
+```python
+import asyncio
+from brainflow_service.config import DEVICE_CONFIGS
+from brainflow_service.runtime import BrainFlowSession
+
+async def main():
+    session = BrainFlowSession(DEVICE_CONFIGS["brainflow-synthetic"])  # or "brainflow-muse-athena"
+    try:
+        session.prepare()
+        session.start()
+        async for frame in session.frames():
+            print(frame.features.mindfulness_score, frame.features.focus_score)
+    finally:
+        session.stop()
+
+asyncio.run(main())
+```
+
+### `config.py` -- device and processing configuration (no dependencies)
+
+- `DEVICE_CONFIGS`: dict of supported devices (`"brainflow-muse-athena"`, `"brainflow-synthetic"`).
+- `DEFAULT_BANDS`: the delta/theta/alpha/beta/gamma `FrequencyBand`s used everywhere above.
+- `ProcessingConfig`/`DEFAULT_PROCESSING`: window size, filter settings.
+
+### `models.py` -- the pydantic response shapes
+
+`SignalFrame`, `SignalFeatures`, `SignalQualityMetadata`,
+`ChannelSignalQualityModel`, `DeviceInfo`, `AffectiveCalibrationStateResponse`,
+etc. These are what `app.py` serializes over HTTP/SSE (`by_alias=True`, so
+JSON keys are camelCase even though the Python attributes are snake_case).
+If you're consuming the HTTP API directly you mostly don't need to import
+these; if you're embedding this package in another Python service, they're
+the types your code will pass around.
+
+## Quick recipes
+
+- **"I have a live BrainFlow board and want scored frames"** -> `runtime.BrainFlowSession`, or just run the service and consume `/sessions/{id}/stream`.
+- **"I have one window of raw samples and just want scores, no session"** -> `dsp.extract_band_power_features` + `metrics.compute_neurofeedback_scores` + `affective_state.compute_raw_affective_sample`, or just call `POST /analyze-window`.
+- **"I already have band powers from somewhere else and just want the scoring math"** -> `metrics.py`/`affective_state.py` have no BrainFlow or hardware dependency; call them directly.
+- **"I want to know if the headset is worn well enough to trust readings"** -> `headset_fit.HeuristicHeadsetFitProvider`.
+
+## Tests
+
+```bash
+uv sync --extra test
+uv run pytest
+```
+
+Tests that exercise BrainFlow's native ML classifiers or the FastAPI
+`TestClient` skip automatically if `brainflow`/`httpx` aren't installed
+(`pytest.importorskip`).
