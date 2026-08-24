@@ -35,3 +35,12 @@ export const defaultHeadsetFitThresholds: HeadsetFitThresholds = {
   maxStepUv: 6500,
   maxClippedFraction: 0.3,
 };
+
+// There is deliberately no Bluetooth-specific threshold profile here.
+// Fit validation for the Muse Athena Web Bluetooth path runs entirely in
+// `brainflow_service` now (`headset_fit.py`'s `BLUETOOTH_HEADSET_FIT_THRESHOLDS`,
+// served by `POST /headset-fit/sessions/{id}/assess`) -- see
+// `museAthenaBluetoothProvider.ts` and `App.tsx`'s `snapshotFromServerFit`.
+// This file's thresholds are used only by `HeuristicHeadsetFitProvider`,
+// which now runs client-side solely for providers that don't already
+// supply a server-computed fit assessment (BrainFlow, replay, mock).

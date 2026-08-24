@@ -384,7 +384,7 @@ function allFlat(channels: ChannelSignalQuality[]) {
   return channels.length > 0 && channels.every((channel) => channel.stdDevUv < 0.25);
 }
 
-function frameAgeMs(frameReceivedAtMs: number, performanceNowMs: number) {
+export function frameAgeMs(frameReceivedAtMs: number, performanceNowMs: number) {
   const epochTimestampThresholdMs = 1_000_000_000_000;
   const currentClockMs =
     frameReceivedAtMs > epochTimestampThresholdMs ? Date.now() : performanceNowMs;
@@ -404,7 +404,7 @@ function messageForState(state: "poor" | "adjusting" | "good", channelName: stri
   return `Check headset fit near ${channelName}`;
 }
 
-function createInitialSnapshot(nowMs = performance.now()): HeadsetFitSnapshot {
+export function createInitialSnapshot(nowMs = performance.now()): HeadsetFitSnapshot {
   return {
     state: "not_detected",
     ready: false,

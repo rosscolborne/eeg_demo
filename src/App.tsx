@@ -40,7 +40,10 @@ import {
   deviceCatalog,
   getConfiguredProviderKey,
 } from "./providers/providerRegistry";
+import { defaultHeadsetFitThresholds } from "./signalQuality/headsetFitConfig";
 import {
+  createInitialSnapshot,
+  frameAgeMs,
   HeuristicHeadsetFitProvider,
   type HeadsetFitSnapshot,
 } from "./signalQuality/headsetFitProvider";
@@ -141,6 +144,12 @@ export default function App() {
     );
   }, [selectedDeviceId]);
   const replaySelected = selectedDevice.id === "brainflow-replay";
+  // The Bluetooth provider's frames already carry a full server-computed
+  // fit assessment (see `museAthenaBluetoothProvider.ts`) -- for this
+  // provider, `computeFitSnapshot` reads that directly instead of
+  // re-deriving one client-side with `fitProviderRef`.
+  const isBluetoothProvider =
+    (selectedDevice.providerKey ?? getConfiguredProviderKey()) === "museAthenaBluetooth";
   const channelNames = useMemo(() => {
     return eegCapability?.channels.length
       ? eegCapability.channels.map((channel) => channel.label)
@@ -165,7 +174,9 @@ export default function App() {
         lastFrameArrivedAtRef.current = performance.now();
         setLatestFrame(frame);
         setAffectiveState(affectiveProviderRef.current.pushFrame(frame, fitSnapshotRef.current));
-        setAffectiveCalibration(affectiveProviderRef.current.getCalibrationState());
+        setAffectiveCalibration(
+          calibrationStateFromFrame(frame) ?? affectiveProviderRef.current.getCalibrationState(),
+        );
         if (recordingActiveRef.current) {
           recordingFramesRef.current.push(frame);
           setRecordedFrameCount(recordingFramesRef.current.length);
@@ -200,6 +211,9 @@ export default function App() {
     });
 
     providerRef.current = provider;
+    // Bluetooth's fit assessment is computed entirely server-side (see
+    // `snapshotFromServerFit`) -- this client heuristic is only used for
+    // providers that don't supply one (BrainFlow, replay, mock).
     fitProviderRef.current.reset();
     affectiveProviderRef.current.reset();
     setAffectiveCalibration(affectiveProviderRef.current.getCalibrationState());
@@ -223,7 +237,7 @@ export default function App() {
     recordingActiveRef.current = false;
     setRecordedFrameCount(0);
     recordingFramesRef.current = [];
-    const initialFit = fitProviderRef.current.update({
+    const initialFit = computeFitSnapshot(fitProviderRef.current, isBluetoothProvider, {
         connectionState: "idle",
         deviceInfo: null,
         frame: null,
@@ -267,10 +281,10 @@ export default function App() {
 
   useEffect(() => {
     const updateFit = () => {
-      const nextFit = fitProviderRef.current.update({
-          connectionState: state,
-          deviceInfo,
-          frame: latestFrame,
+      const nextFit = computeFitSnapshot(fitProviderRef.current, isBluetoothProvider, {
+        connectionState: state,
+        deviceInfo,
+        frame: latestFrame,
       });
       fitSnapshotRef.current = nextFit;
       setFitSnapshot(nextFit);
@@ -280,7 +294,7 @@ export default function App() {
     const intervalId = window.setInterval(updateFit, 500);
 
     return () => window.clearInterval(intervalId);
-  }, [deviceInfo, latestFrame, state]);
+  }, [deviceInfo, latestFrame, state, isBluetoothProvider]);
 
   useEffect(() => {
     if (!connected) return;
@@ -385,7 +399,7 @@ export default function App() {
 
     const nowMs = performance.now();
     fitProviderRef.current.reset();
-    const initialFit = fitProviderRef.current.update({
+    const initialFit = computeFitSnapshot(fitProviderRef.current, isBluetoothProvider, {
       connectionState: state,
       deviceInfo,
       frame: latestFrame,
@@ -403,7 +417,7 @@ export default function App() {
     fitCheckTimeoutRef.current = window.setTimeout(() => {
       const currentResult =
         fitSnapshotRef.current ??
-        fitProviderRef.current.update({
+        computeFitSnapshot(fitProviderRef.current, isBluetoothProvider, {
           connectionState: state,
           deviceInfo,
           frame: latestFrame,
@@ -434,15 +448,28 @@ export default function App() {
   }
 
   function startAffectiveCalibration() {
-    affectiveProviderRef.current.startCalibration();
+    // BrainFlow and Bluetooth connections calibrate server-side (see
+    // `analysis.AnalysisProviders.affective_state`) -- the next frame's
+    // `features.calibrationStatus` picks up the new state (see
+    // `calibrationStateFromFrame`). Providers with no server session
+    // (Mock, replay) fall back to the client-only provider.
+    if (providerRef.current?.startAffectiveCalibration) {
+      void providerRef.current.startAffectiveCalibration();
+    } else {
+      affectiveProviderRef.current.startCalibration();
+      setAffectiveCalibration(affectiveProviderRef.current.getCalibrationState());
+    }
     setAffectiveState(null);
-    setAffectiveCalibration(affectiveProviderRef.current.getCalibrationState());
   }
 
   function resetAffectiveCalibration() {
-    affectiveProviderRef.current.resetCalibration();
+    if (providerRef.current?.resetAffectiveCalibration) {
+      void providerRef.current.resetAffectiveCalibration();
+    } else {
+      affectiveProviderRef.current.resetCalibration();
+      setAffectiveCalibration(affectiveProviderRef.current.getCalibrationState());
+    }
     setAffectiveState(null);
-    setAffectiveCalibration(affectiveProviderRef.current.getCalibrationState());
   }
 
   async function disconnect() {
@@ -732,6 +759,123 @@ export default function App() {
       </main>
     </div>
   );
+}
+
+/** Reads valence/arousal calibration progress straight off a frame's
+ * server-computed `features` (see `analysis.analyze_window`, which stamps
+ * every window with the connection's current calibration state) -- `null`
+ * for a frame with no `features` at all (Mock, or an older replay
+ * recording), so the caller can fall back to the client-only provider's
+ * own calibration state in that case. */
+function calibrationStateFromFrame(frame: SignalFrame): AffectiveCalibrationState | null {
+  const status = frame.features?.calibrationStatus;
+  if (!status) return null;
+
+  return {
+    status,
+    progress: frame.features?.calibrationProgress ?? 0,
+    required: frame.features?.calibrationRequired ?? 24,
+  };
+}
+
+/** Picks the right source for a `HeadsetFitSnapshot`: the Bluetooth
+ * provider's frames already carry a full assessment computed by
+ * `brainflow_service` (see `snapshotFromServerFit`); every other provider
+ * still gets one derived client-side by `fitProvider`, unchanged from
+ * before this existed. */
+function computeFitSnapshot(
+  fitProvider: HeuristicHeadsetFitProvider,
+  isBluetoothProvider: boolean,
+  input: {
+    connectionState: EegConnectionState;
+    deviceInfo: DeviceInfo | null;
+    frame: SignalFrame | null;
+    nowMs?: number;
+  },
+): HeadsetFitSnapshot {
+  if (isBluetoothProvider) {
+    return snapshotFromServerFit(input.connectionState, input.frame, input.nowMs ?? performance.now());
+  }
+  return fitProvider.update(input);
+}
+
+/** Builds a `HeadsetFitSnapshot` straight from a server-computed
+ * assessment (`SignalFrame.quality`, populated by
+ * `POST /headset-fit/sessions/{id}/assess` -- see
+ * `museAthenaBluetoothProvider.ts`), instead of deriving one from raw
+ * samples the way `HeuristicHeadsetFitProvider.update()` does. The
+ * "not connected" / "stale frame" cases below are the same client-only
+ * checks `update()` runs first, reproduced here because the server has no
+ * notion of a browser's transport connection or its last-frame clock --
+ * everything past that point is the server's assessment, verbatim. */
+function snapshotFromServerFit(
+  connectionState: EegConnectionState,
+  frame: SignalFrame | null,
+  nowMs: number,
+): HeadsetFitSnapshot {
+  const connected = connectionState === "connected" || connectionState === "streaming";
+  if (!connected) {
+    return {
+      ...createInitialSnapshot(nowMs),
+      state: "not_detected",
+      connected: false,
+      message: "Headset not detected",
+      blockers: ["Connect an EEG device."],
+    };
+  }
+
+  if (!frame || frameAgeMs(frame.receivedAtMs, nowMs) > defaultHeadsetFitThresholds.staleFrameMs) {
+    return {
+      ...createInitialSnapshot(nowMs),
+      state: "not_worn",
+      connected: true,
+      message: "Waiting for EEG signal",
+      blockers: ["Waiting for a fresh EEG signal."],
+    };
+  }
+
+  const quality = frame.quality;
+  if (!quality?.state) {
+    // No assessment yet for this window -- the fit-quality call for it may
+    // have failed, or the connection is too new to have one. Same
+    // "waiting" state the client heuristic shows before it has enough
+    // samples, rather than a misleading blank/poor state.
+    return {
+      ...createInitialSnapshot(nowMs),
+      state: "not_worn",
+      connected: true,
+      message: "Waiting for headset fit assessment",
+      blockers: ["Waiting for a fresh EEG signal."],
+    };
+  }
+
+  return {
+    state: quality.state,
+    ready: quality.ready ?? false,
+    connected: true,
+    worn: quality.worn ?? false,
+    source: quality.source,
+    message: quality.message ?? "Check headset fit",
+    blockers: quality.blockers ?? [],
+    channels: (quality.channels ?? []).map((channel) => ({
+      channel: channel.channel,
+      state: channel.state,
+      score: channel.score,
+      rmsUv: channel.rmsUv,
+      stdDevUv: channel.stdDevUv,
+      peakToPeakUv: channel.peakToPeakUv,
+      meanStepUv: channel.meanStepUv,
+      maxAbsUv: channel.maxAbsUv,
+      maxStepUv: channel.maxStepUv,
+      clippedFraction: channel.clippedFraction,
+      source: quality.source,
+      message: channel.message,
+    })),
+    stableForMs: quality.stableForMs ?? 0,
+    requiredStableMs: quality.requiredStableMs ?? defaultHeadsetFitThresholds.stableReadyMs,
+    excessiveArtifact: quality.excessiveArtifact ?? false,
+    updatedAtMs: nowMs,
+  };
 }
 
 function completeFitCheckResult(result: HeadsetFitSnapshot): HeadsetFitSnapshot {

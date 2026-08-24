@@ -8,19 +8,13 @@ from typing import AsyncIterator
 
 import numpy as np
 
+from .analysis import AnalysisProviders, analyze_window
 from .config import DEFAULT_PROCESSING, DEVICE_CONFIGS, BrainFlowDeviceConfig, ProcessingConfig
-from .dsp import (
-    build_eeg_window,
-    config_metadata,
-    extract_band_power_features,
-    extract_brainflow_mindfulness,
-    extract_brainflow_restfulness,
-    preprocess_eeg_window,
-)
-from .affective_state import AffectiveCalibrationState, AffectiveStateProvider, FitQualityHint
-from .headset_fit import HeuristicHeadsetFitProvider, to_signal_quality_metadata
-from .models import CalibrationProfile, DeviceInfo, SensorCapability, SignalChannel, SignalFeatures, SignalFrame
-from .training import AttentionBaselineProvider, to_attention_metric_sample_model, to_calibration_profile_model
+from .dsp import build_eeg_window, config_metadata
+from .affective_state import AffectiveCalibrationState
+from .headset_fit import HeuristicHeadsetFitProvider
+from .models import CalibrationProfile, DeviceInfo, SensorCapability, SignalChannel, SignalFrame
+from .training import to_calibration_profile_model
 
 
 class BrainFlowSession:
@@ -45,21 +39,25 @@ class BrainFlowSession:
         self.timestamp_channel: int | None = None
         self.device_info: DeviceInfo | None = None
         self._running = False
-        self._affective_state = AffectiveStateProvider()
-        self._headset_fit = HeuristicHeadsetFitProvider()
-        self._attention = AttentionBaselineProvider()
+        # Every window this session analyzes goes through `analyze_window`
+        # with this same bundle of providers, for the life of the
+        # connection -- see `analysis.py`'s module docstring for why that's
+        # also exactly what a Bluetooth connection's analysis session does,
+        # so the two transports' smoothing/calibration/baselines can never
+        # drift apart.
+        self._analysis = AnalysisProviders(headset_fit=HeuristicHeadsetFitProvider())
 
     def start_calibration(self) -> None:
-        self._affective_state.start_calibration()
+        self._analysis.affective_state.start_calibration()
 
     def reset_calibration(self) -> None:
-        self._affective_state.reset_calibration()
+        self._analysis.affective_state.reset_calibration()
 
     def get_calibration_state(self) -> AffectiveCalibrationState:
-        return self._affective_state.get_calibration_state()
+        return self._analysis.affective_state.get_calibration_state()
 
     def get_training_calibration_profile(self) -> CalibrationProfile | None:
-        profile = self._attention.get_calibration_profile()
+        profile = self._analysis.attention.get_calibration_profile()
         return to_calibration_profile_model(profile) if profile else None
 
     def prepare(self) -> DeviceInfo:
@@ -164,64 +162,15 @@ class BrainFlowSession:
             timestamps_ms = (data[self.timestamp_channel, :] * 1000.0).astype(float).tolist()
 
         channels = self.device_info.capabilities[0].channels
-        fit_snapshot = self._headset_fit.update(channels=channels, samples=eeg_samples)
-        quality = to_signal_quality_metadata(fit_snapshot)
-
         window = build_eeg_window(data, self.eeg_channels, window_samples)
-        features = None
-        training_sample = None
-        if window is not None:
-            processed = preprocess_eeg_window(window, sample_rate, self.processing)
-            band_powers = extract_band_power_features(processed, sample_rate)
-            brainflow_mindfulness = extract_brainflow_mindfulness(window, sample_rate)
-            brainflow_restfulness = extract_brainflow_restfulness(window, sample_rate)
-            if band_powers or brainflow_mindfulness is not None or brainflow_restfulness is not None:
-                # Mirrors AffectiveStateProvider's `if (quality?.excessiveArtifact)
-                # return null` gate and its confidence quality factor, using
-                # this session's real headset-fit assessment instead of
-                # always assuming full reliability.
-                theta_power = band_powers.absolute.get("theta", 0.0) if band_powers else 0.0
-                alpha_power = band_powers.absolute.get("alpha", 0.0) if band_powers else 0.0
-                beta_power = band_powers.absolute.get("beta", 0.0) if band_powers else 0.0
-                gamma_power = band_powers.absolute.get("gamma", 0.0) if band_powers else 0.0
-                sample = self._affective_state.push(
-                    at_ms=time.time() * 1000.0,
-                    theta_power=theta_power,
-                    alpha_power=alpha_power,
-                    beta_power=beta_power,
-                    gamma_power=gamma_power,
-                    raw_mindfulness=brainflow_mindfulness,
-                    raw_restfulness=brainflow_restfulness,
-                    reliable=not fit_snapshot.excessive_artifact,
-                    fit=FitQualityHint(ready=fit_snapshot.ready, state=fit_snapshot.state),
-                )
-                features = SignalFeatures(
-                    bandPowers=band_powers,
-                    brainflowConcentration=brainflow_mindfulness,
-                    brainflowRestfulness=brainflow_restfulness,
-                    mindfulnessScore=sample.mindfulness_score if sample else None,
-                    restfulnessScore=sample.restfulness_score if sample else None,
-                    focusScore=sample.focus_score if sample else None,
-                    relaxScore=sample.relax_score if sample else None,
-                    valence=sample.valence if sample else None,
-                    arousal=sample.arousal if sample else None,
-                    rawValence=sample.raw_valence if sample else None,
-                    rawArousal=sample.raw_arousal if sample else None,
-                    stateLabel=sample.label if sample else None,
-                    confidence=sample.confidence if sample else None,
-                    calibrationActive=sample.calibration_active if sample else False,
-                )
-
-                attention = self._attention.push(
-                    at_ms=time.time() * 1000.0,
-                    theta_power=theta_power,
-                    alpha_power=alpha_power,
-                    beta_power=beta_power,
-                    raw_mindfulness=brainflow_mindfulness,
-                    raw_restfulness=brainflow_restfulness,
-                    reliable=not fit_snapshot.excessive_artifact,
-                )
-                training_sample = to_attention_metric_sample_model(attention) if attention else None
+        analysis = analyze_window(
+            providers=self._analysis,
+            channels=channels,
+            eeg_samples=eeg_samples,
+            raw_window=window,
+            sample_rate=sample_rate,
+            processing=self.processing,
+        )
 
         return SignalFrame(
             sensor="eeg",
@@ -231,9 +180,9 @@ class BrainFlowSession:
             timestampsMs=timestamps_ms,
             receivedAtMs=time.time() * 1000.0,
             sequenceId=self.sequence_id,
-            training=training_sample,
-            quality=quality,
-            features=features,
+            training=analysis.training,
+            quality=analysis.quality,
+            features=analysis.features,
         )
 
     def _device_info(self, board_shim, presets) -> DeviceInfo:

@@ -143,10 +143,18 @@ To allow a different front-end's origin, set:
 EEG_BRAINFLOW_CORS_ORIGINS=https://my-other-frontend.example.com uvicorn brainflow_service.app:app --port 8000
 ```
 
-Two entry points: `POST /analyze-window` for a stateless, single-window
-score (no smoothing/calibration — there's no session to carry state across),
-and `POST /sessions` + `GET /sessions/{id}/stream` for a live SSE feed of
-smoothed, calibrated scores with signal-quality gating. See
+Three entry points: `POST /analyze-window` for a stateless, single-window
+score (no smoothing/calibration — there's no session to carry state across);
+`POST /sessions` + `GET /sessions/{id}/stream` for a live SSE feed of
+smoothed, calibrated scores with signal-quality gating; and
+`POST /headset-fit/sessions` + `POST /headset-fit/sessions/{id}/analyze-window`
+for the same kind of smoothed, calibrated scores (plus headset fit) for EEG
+collected over Bluetooth by any front end (not just this repo's bundled
+one) — both connection methods run through the exact same
+`brainflow_service.analysis.analyze_window()` pipeline, so their smoothing
+can't drift apart; see
+[src/providers/museAthenaBluetoothProvider.ts](src/providers/museAthenaBluetoothProvider.ts)
+for how the bundled app uses it. See
 [brainflow_service/README.md](brainflow_service/README.md) for the full
 endpoint table, field reference, and — if you're embedding this in another
 Python backend instead of running it as a service — the module-by-module

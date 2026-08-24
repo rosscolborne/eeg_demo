@@ -3,8 +3,10 @@ from __future__ import annotations
 import math
 
 from brainflow_service.headset_fit import (
+    BLUETOOTH_HEADSET_FIT_THRESHOLDS,
     DEFAULT_HEADSET_FIT_THRESHOLDS,
     HeuristicHeadsetFitProvider,
+    select_scalp_electrode_indices,
     to_signal_quality_metadata,
 )
 from brainflow_service.models import SignalChannel
@@ -164,3 +166,98 @@ def test_to_signal_quality_metadata_round_trips_fields() -> None:
     assert metadata.excessive_artifact == snapshot.excessive_artifact
     assert len(metadata.channels) == len(snapshot.channels)
     assert metadata.channels[0].channel.id == snapshot.channels[0].channel.id
+
+
+# --- Bluetooth (Muse Athena Web Bluetooth) profile -------------------------
+#
+# These replay the exact per-channel stats captured live from the bundled
+# app's `[fit debug]` console log (both worn and resting-on-desk, same
+# headset, same session -- see the headset-fit-over-Bluetooth investigation)
+# through the real `BLUETOOTH_HEADSET_FIT_THRESHOLDS`, as a regression test
+# against the false-"good" bug: an unworn headset over Bluetooth used to
+# read as `good`/`ready` because `DEFAULT_HEADSET_FIT_THRESHOLDS`'s ceilings
+# are calibrated for BrainFlow's much larger scale for the same contact
+# state.
+
+
+def _synthesize_channel(std_uv: float, max_step_uv: float, n: int = 512, seed: int = 1) -> list[float]:
+    """Deterministic pseudo-noise whose stdDev/maxStep land close to the
+    given targets, so real captured summary stats can be replayed as a
+    sample window without needing the raw per-sample capture."""
+    state = seed
+
+    def rnd() -> float:
+        nonlocal state
+        state = (state * 48271) % 2147483647
+        return state / 2147483647
+
+    values: list[float] = []
+    v = 0.0
+    for _ in range(n):
+        step = (rnd() - 0.5) * 2 * max_step_uv * 0.6
+        v += step * 0.15
+        v = max(-3 * std_uv, min(3 * std_uv, v))
+        values.append(v + (rnd() - 0.5) * std_uv * 0.3)
+    return values
+
+
+def _synthesize_window(stats_by_channel: list[tuple[float, float]]) -> list[list[float]]:
+    columns = [_synthesize_channel(std_uv, max_step_uv, seed=index + 1) for index, (std_uv, max_step_uv) in enumerate(stats_by_channel)]
+    return [list(row) for row in zip(*columns)]
+
+
+BLE_WORN_STATS = [(179.1, 392.7), (10.4, 36.8), (13.7, 53.2), (71.4, 181.2)]  # tp9, af7, af8, tp10
+BLE_OFF_HEAD_STATS = [(570.8, 1216.6), (575.2, 1278.3), (572.5, 1220.3), (572.8, 1219.5)]
+
+
+def test_bluetooth_thresholds_pass_real_worn_capture() -> None:
+    samples = _synthesize_window(BLE_WORN_STATS)
+
+    snapshot = HeuristicHeadsetFitProvider(BLUETOOTH_HEADSET_FIT_THRESHOLDS).update(
+        channels=FOUR_MUSE_CHANNELS, samples=samples,
+    )
+
+    assert snapshot.state == "good"
+    assert snapshot.worn is True
+
+
+def test_bluetooth_thresholds_reject_real_off_head_capture() -> None:
+    samples = _synthesize_window(BLE_OFF_HEAD_STATS)
+
+    snapshot = HeuristicHeadsetFitProvider(BLUETOOTH_HEADSET_FIT_THRESHOLDS).update(
+        channels=FOUR_MUSE_CHANNELS, samples=samples,
+    )
+
+    assert snapshot.state != "good"
+    assert snapshot.state != "ready"
+    assert snapshot.worn is False
+
+
+def test_default_thresholds_would_have_falsely_passed_the_off_head_capture() -> None:
+    # Documents the actual bug this profile fixes: the same off-head data
+    # that `BLUETOOTH_HEADSET_FIT_THRESHOLDS` correctly rejects above reads
+    # as "good" against the BrainFlow-calibrated defaults.
+    samples = _synthesize_window(BLE_OFF_HEAD_STATS)
+
+    snapshot = HeuristicHeadsetFitProvider(DEFAULT_HEADSET_FIT_THRESHOLDS).update(
+        channels=FOUR_MUSE_CHANNELS, samples=samples,
+    )
+
+    assert snapshot.state == "good"
+    assert snapshot.worn is True
+
+
+def test_select_scalp_electrode_indices_drops_aux_channels() -> None:
+    names = ["TP9", "AF7", "AF8", "TP10", "AUX1", "AUX2", "AUX3", "AUX4"]
+
+    assert select_scalp_electrode_indices(names) == [0, 1, 2, 3]
+
+
+def test_select_scalp_electrode_indices_is_case_insensitive() -> None:
+    assert select_scalp_electrode_indices(["tp9", "af7", "af8", "tp10"]) == [0, 1, 2, 3]
+
+
+def test_select_scalp_electrode_indices_falls_back_to_all_when_unrecognized() -> None:
+    names = ["Channel 1", "Channel 2", "Channel 3"]
+
+    assert select_scalp_electrode_indices(names) == [0, 1, 2]

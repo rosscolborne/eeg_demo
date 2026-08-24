@@ -126,7 +126,19 @@ export class AffectiveStateProvider {
   ): AffectiveStateSample | null {
     if (quality?.excessiveArtifact) return null;
 
-    const powers = frame.features?.bandPowers?.absolute ?? computeBandPowers(frame, affectiveBands)?.powers;
+    // `brainflow_service` already smooths and calibrates these scores --
+    // identically for a BrainFlow or a Bluetooth connection, both of which
+    // always send a `features` object once they have one (see
+    // `analysis.analyze_window`). Relay them as-is instead of recomputing
+    // a second, independent smoothing pass here. The local computation
+    // below only runs for sources with no server behind them at all (the
+    // Mock provider, or a replay recording made before this field
+    // existed).
+    if (frame.features) {
+      return this.fromServerFeatures(frame, frame.features, quality);
+    }
+
+    const powers = computeBandPowers(frame, affectiveBands)?.powers;
     if (!powers) return null;
 
     const thetaPower = finitePower(powers.theta);
@@ -232,6 +244,50 @@ export class AffectiveStateProvider {
       brainflowRestfulnessScore,
       focusScore: Math.round(clamp(this.smoothedFocusScore, 0, 100)),
       relaxScore: Math.round(clamp(this.smoothedRelaxScore, 0, 100)),
+      reliable: !quality?.excessiveArtifact,
+    };
+  }
+
+  /** Adapts an already-smoothed `SignalFeatures` from `brainflow_service`
+   * (see `analysis.analyze_window`) into this module's `AffectiveStateSample`
+   * shape, without recomputing anything -- the smoothing, calibration, and
+   * classification already happened server-side. `null` when the server
+   * hasn't produced a valence/arousal reading yet for this connection
+   * (e.g. still gathering its first window). */
+  private fromServerFeatures(
+    frame: SignalFrame,
+    features: NonNullable<SignalFrame["features"]>,
+    quality?: HeadsetFitSnapshot | null,
+  ): AffectiveStateSample | null {
+    if (
+      features.valence == null ||
+      features.arousal == null ||
+      features.rawValence == null ||
+      features.rawArousal == null
+    ) {
+      return null;
+    }
+
+    const powers = features.bandPowers?.absolute;
+    return {
+      atMs: frame.receivedAtMs,
+      valence: features.valence,
+      arousal: features.arousal,
+      rawValence: features.rawValence,
+      rawArousal: features.rawArousal,
+      calibrationActive: features.calibrationActive ?? false,
+      label: features.stateLabel ?? classifyAffectiveState(features.valence, features.arousal),
+      confidence:
+        features.confidence ?? estimateConfidence(features.valence, features.arousal, quality),
+      scoreSource: "eeg_band_power_proxy",
+      thetaPower: finitePower(powers?.theta),
+      alphaPower: finitePower(powers?.alpha),
+      betaPower: finitePower(powers?.beta),
+      gammaPower: finitePower(powers?.gamma),
+      brainflowMindfulnessScore: features.mindfulnessScore ?? null,
+      brainflowRestfulnessScore: features.restfulnessScore ?? null,
+      focusScore: features.focusScore ?? 50,
+      relaxScore: features.relaxScore ?? 50,
       reliable: !quality?.excessiveArtifact,
     };
   }

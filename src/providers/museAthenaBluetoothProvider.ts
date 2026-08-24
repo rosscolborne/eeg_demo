@@ -12,12 +12,41 @@ import type {
   ProviderError,
   SignalFeatures,
   SignalFrame,
+  SignalQualityMetadata,
+  TrainingMetricSample,
 } from "../domain/eeg";
 import type { EegProvider, EegProviderDescriptor } from "./eegProvider";
 
 const defaultBrainFlowServiceUrl =
   import.meta.env.VITE_BRAINFLOW_SERVICE_URL ?? "http://127.0.0.1:8000";
 const analysisWindowSeconds = 2;
+
+// The scalp electrodes, and only those, count as EEG for headset fit.
+//
+// BrainFlow's MUSE_S_ATHENA_BOARD reports exactly these four as its EEG
+// channels (`get_eeg_channels`/`get_eeg_names`) and keeps the headband's
+// AUX inputs on separate, non-EEG rows, so the fit heuristic there only
+// ever grades real skin contact. The Web Bluetooth stream instead packs
+// TP9/AF7/AF8/TP10 *and* AUX1-4 into one 8-channel EEG block, and an
+// unconnected AUX input reads as a clean, plausible EEG trace whether or
+// not the headband is on a head. Four permanently "good" channels out of
+// eight is enough to satisfy HeuristicHeadsetFitProvider's
+// good-channel-fraction rule, which is why the fit check passed with the
+// headset sitting on the desk. Keeping only the scalp electrodes gives
+// that heuristic the same four channels it grades over BrainFlow.
+const scalpElectrodeIds = new Set(["tp9", "af7", "af8", "tp10"]);
+
+/** Indices of `channelNames` that are scalp electrodes, in stream order.
+ * Falls back to every channel for a layout that uses none of the Muse
+ * electrode names, so an unrecognized device streams as before rather
+ * than losing all of its channels. */
+function scalpElectrodeIndices(channelNames: string[]): number[] {
+  const indices = channelNames
+    .map((name, index) => (scalpElectrodeIds.has(name.toLowerCase()) ? index : -1))
+    .filter((index) => index >= 0);
+
+  return indices.length > 0 ? indices : channelNames.map((_, index) => index);
+}
 
 export class MuseAthenaBluetoothProvider implements EegProvider {
   readonly descriptor: EegProviderDescriptor = {
@@ -32,6 +61,12 @@ export class MuseAthenaBluetoothProvider implements EegProvider {
   private analysisInFlight = false;
   private analysisFailureReported = false;
   private emittedSequenceId = 0;
+  // Backs this connection's whole server-side analysis session
+  // (`analysis.py`'s `AnalysisSessionStore`, via `POST /headset-fit/sessions`)
+  // -- headset fit *and* the smoothed mindfulness/restfulness/focus/relax
+  // and valence/arousal scores. All of that runs in brainflow_service, not
+  // here -- see `analyzeWindow`.
+  private fitSessionId: string | null = null;
 
   constructor(
     private readonly events: EegProviderEvents,
@@ -56,9 +91,10 @@ export class MuseAthenaBluetoothProvider implements EegProvider {
     this.analysisInFlight = false;
     this.analysisFailureReported = false;
     this.emittedSequenceId = 0;
+    this.fitSessionId = null;
 
     try {
-      await initEegWasm(eegWasmUrl);
+      await Promise.all([initEegWasm(eegWasmUrl), this.startFitSession()]);
 
       const transport = new BleTransport({
         deviceOptions: {
@@ -102,11 +138,23 @@ export class MuseAthenaBluetoothProvider implements EegProvider {
   async disconnect(reason = "Bluetooth disconnected") {
     const transport = this.transport;
     this.transport = null;
+    const fitSessionId = this.fitSessionId;
+    this.fitSessionId = null;
+
     if (transport) {
       try {
         await transport.disconnect();
       } catch (error) {
         console.warn("Unable to disconnect Web Bluetooth transport", error);
+      }
+    }
+    if (fitSessionId) {
+      try {
+        await fetch(`${this.brainFlowServiceUrl}/headset-fit/sessions/${fitSessionId}`, {
+          method: "DELETE",
+        });
+      } catch (error) {
+        console.warn("Unable to stop headset-fit session", error);
       }
     }
 
@@ -118,7 +166,13 @@ export class MuseAthenaBluetoothProvider implements EegProvider {
     if (!this.deviceInfo) {
       this.publishDeviceInfo(this.transport, frame);
     }
-    this.analysisBuffer.push(...eeg.samples);
+    // Drop AUX1-4 before anything downstream sees them -- see
+    // `scalpElectrodeIndices`.
+    const electrodeIndices = scalpElectrodeIndices(eeg.channelNames);
+    const electrodeNames = electrodeIndices.map((index) => eeg.channelNames[index]);
+    this.analysisBuffer.push(
+      ...eeg.samples.map((row) => electrodeIndices.map((index) => row[index])),
+    );
 
     const sampleRate = eeg.sampleRateHz;
     const maxSamples = Math.max(1, Math.round(sampleRate * analysisWindowSeconds));
@@ -131,13 +185,13 @@ export class MuseAthenaBluetoothProvider implements EegProvider {
 
     this.analysisInFlight = true;
     const windowSamples = [...this.analysisBuffer];
-    const features = await this.analyzeWindow(windowSamples, sampleRate);
+    const analysis = await this.analyzeWindow(windowSamples, sampleRate, electrodeNames);
     this.analysisInFlight = false;
 
     const normalized: SignalFrame = {
       sensor: "eeg",
       sampleRateHz: eeg.sampleRateHz,
-      channels: eeg.channelNames.map((name) => ({
+      channels: electrodeNames.map((name) => ({
         id: name.toLowerCase(),
         label: name,
         unit: "uV",
@@ -146,12 +200,12 @@ export class MuseAthenaBluetoothProvider implements EegProvider {
       timestampsMs: eeg.timestampsMs?.slice(-windowSamples.length),
       receivedAtMs: frame.emittedAtMs,
       sequenceId: ++this.emittedSequenceId,
-      quality: {
+      quality: analysis?.quality ?? {
         source: "inferred",
-        excessiveArtifact: false,
-        message: "Quality inferred from Web Bluetooth EEG stream",
+        message: "Headset fit assessment unavailable",
       },
-      features,
+      features: analysis?.features ?? null,
+      training: analysis?.training ?? null,
     };
 
     if (normalized.sequenceId <= 10 || normalized.sequenceId % 100 === 0) {
@@ -160,23 +214,77 @@ export class MuseAthenaBluetoothProvider implements EegProvider {
     this.events.onSignalFrame(normalized);
   }
 
-  private async analyzeWindow(
-    samples: number[][],
-    sampleRateHz: number,
-  ): Promise<SignalFeatures | null> {
+  /** Opens this connection's stateful analysis session in brainflow_service
+   * -- see `analysis.AnalysisSessionStore`. Best-effort: if this fails
+   * (service unreachable), `analyzeWindow` degrades to "no analysis"
+   * rather than blocking the connection, and its own error reporting
+   * already surfaces a service-down error to the user. */
+  private async startFitSession() {
     try {
-      const response = await fetch(`${this.brainFlowServiceUrl}/analyze-window`, {
+      const response = await fetch(`${this.brainFlowServiceUrl}/headset-fit/sessions`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sampleRateHz, samples }),
       });
       if (!response.ok) {
         throw new Error(await response.text());
       }
+      const payload = (await response.json()) as { fitSessionId?: string };
+      this.fitSessionId = payload.fitSessionId ?? null;
+    } catch (error) {
+      this.fitSessionId = null;
+      console.warn("Unable to start headset-fit session", error);
+    }
+  }
 
-      const payload = (await response.json()) as { features?: SignalFeatures | null };
+  /** Headset fit, and the smoothed mindfulness/restfulness/focus/relax and
+   * valence/arousal scores, all happen here, entirely server-side, via
+   * `POST /headset-fit/sessions/{id}/analyze-window` -- this method only
+   * sends this window's samples and reads back the result. Using this
+   * connection's session (rather than the stateless `/analyze-window`) is
+   * what gives Web Bluetooth the same real smoothing/calibration a direct
+   * BrainFlow connection's `/sessions/{id}/stream` applies -- see
+   * `brainflow_service/analysis.py`. */
+  private async analyzeWindow(
+    samples: number[][],
+    sampleRateHz: number,
+    channelIds: string[],
+  ): Promise<{
+    features: SignalFeatures | null;
+    quality: SignalQualityMetadata | null;
+    training: TrainingMetricSample | null;
+  } | null> {
+    if (!this.fitSessionId) return null;
+
+    try {
+      const response = await fetch(
+        `${this.brainFlowServiceUrl}/headset-fit/sessions/${this.fitSessionId}/analyze-window`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sampleRateHz, samples, channelIds }),
+        },
+      );
+      if (!response.ok) {
+        if (response.status === 404) {
+          // The session was evicted server-side (e.g. idle timeout) --
+          // get a fresh one for the next window instead of failing for
+          // the rest of the connection.
+          this.fitSessionId = null;
+          void this.startFitSession();
+        }
+        throw new Error(await response.text());
+      }
+
+      const payload = (await response.json()) as {
+        features?: SignalFeatures | null;
+        quality?: SignalQualityMetadata | null;
+        training?: TrainingMetricSample | null;
+      };
       this.analysisFailureReported = false;
-      return payload.features ?? null;
+      return {
+        features: payload.features ?? null,
+        quality: payload.quality ?? null,
+        training: payload.training ?? null,
+      };
     } catch (error) {
       if (!this.analysisFailureReported) {
         this.analysisFailureReported = true;
@@ -192,9 +300,32 @@ export class MuseAthenaBluetoothProvider implements EegProvider {
     }
   }
 
+  /** Starts/resets this connection's valence/arousal calibration -- the
+   * Bluetooth counterpart of `BrainFlowHttpProvider`'s calls to
+   * `/sessions/{id}/calibration/*`, backed by the same
+   * `AffectiveStateProvider` via this connection's analysis session. */
+  async startAffectiveCalibration() {
+    if (!this.fitSessionId) return;
+    await fetch(`${this.brainFlowServiceUrl}/headset-fit/sessions/${this.fitSessionId}/calibration/start`, {
+      method: "POST",
+    });
+  }
+
+  async resetAffectiveCalibration() {
+    if (!this.fitSessionId) return;
+    await fetch(`${this.brainFlowServiceUrl}/headset-fit/sessions/${this.fitSessionId}/calibration/reset`, {
+      method: "POST",
+    });
+  }
+
   private publishDeviceInfo(transport: BleTransport | null, frame?: HeadbandFrameV1) {
     const boardInfo = safeBoardInfo(transport);
-    const channelNames = boardInfo?.eeg_channel_names ?? frame?.eeg.channelNames ?? [];
+    const reportedNames = boardInfo?.eeg_channel_names ?? frame?.eeg.channelNames ?? [];
+    // Advertise the same channels the frames carry -- see
+    // `scalpElectrodeIndices`.
+    const channelNames = scalpElectrodeIndices(reportedNames).map(
+      (index) => reportedNames[index],
+    );
     const sampleRate = boardInfo?.sample_rate_hz ?? frame?.eeg.sampleRateHz ?? null;
 
     this.deviceInfo = {

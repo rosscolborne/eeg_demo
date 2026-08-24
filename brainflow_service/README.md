@@ -28,13 +28,27 @@ raw EEG samples
   -> metrics.py              focus/relax + mindfulness/restfulness smoothing
   -> affective_state.py      valence/arousal, calibration, state labelling
   -> training.py              baseline-relative training score
+  -> analysis.py          analyze_window() ties the four boxes above into one
+                           per-connection pipeline, shared by both transports:
   -> models.py           the pydantic response shapes above get returned as
-  -> app.py                ...over HTTP/SSE, via runtime.py's session/store
+  -> app.py                ...over HTTP/SSE, via runtime.py (BrainFlow) and
+                              analysis.py's AnalysisSessionStore (Bluetooth)
 ```
 
-`app.py`/`runtime.py` are the only pieces that know about BrainFlow hardware
-sessions or HTTP. Everything else is plain, dependency-light scoring math you
-can call directly.
+`app.py`/`runtime.py`/`analysis.py` are the only pieces that know about
+BrainFlow hardware sessions or HTTP. Everything else is plain,
+dependency-light scoring math you can call directly.
+
+**Both connection methods get identical smoothing.** A direct BrainFlow
+connection (`runtime.BrainFlowSession`) and a Bluetooth connection
+(`analysis.AnalysisSessionStore`, behind the `/headset-fit/sessions/*`
+endpoints) each own one `analysis.AnalysisProviders` -- the same
+`AffectiveStateProvider`/`AttentionBaselineProvider`/
+`HeuristicHeadsetFitProvider` bundle -- and both push every window through
+the same `analysis.analyze_window()`. There's exactly one implementation of
+the EMA smoothing/calibration/baselines, not two that could drift apart;
+the bundled front end doesn't recompute any of this itself, it just relays
+whatever `features`/`training` a frame already carries.
 
 ## Running it as a service
 
@@ -54,7 +68,14 @@ Python project.
 |---|---|
 | `GET /health` | Liveness check. |
 | `GET /devices` | Lists configured BrainFlow devices (`config.DEVICE_CONFIGS`). |
-| `POST /analyze-window` | Stateless: score one raw EEG window. No smoothing/calibration/stability (there's no session to hold that state). Body: `{sampleRateHz, samples}` (`samples` row-major: one inner list per time sample, across channels). Returns `{features, quality}`. |
+| `POST /analyze-window` | Stateless: score one raw EEG window. No smoothing/calibration/stability (there's no session to hold that state). Body: `{sampleRateHz, samples}` (`samples` row-major: one inner list per time sample, across channels). Returns `{features, quality}`. Its `quality` is calibrated for BrainFlow's own scale -- prefer the session-scoped Bluetooth endpoints below for a live connection, especially one collected over Web Bluetooth. |
+| `POST /headset-fit/sessions` | Starts a stateful analysis session for one Muse Athena connected over Bluetooth (any Bluetooth stack, not just this repo's bundled provider) -- headset fit, plus the same smoothed scores and Training baseline a BrainFlow session gets, all via `analysis.AnalysisProviders`. Returns `{fitSessionId}`. |
+| `POST /headset-fit/sessions/{id}/analyze-window` | The Bluetooth counterpart of `GET /sessions/{id}/stream`: runs one window through `analysis.analyze_window()` using this session's providers. Body: `{sampleRateHz, samples, channelIds}` (`channelIds` as below). Returns `{features, quality, training}`, all smoothed/calibrated the same way a BrainFlow session's frames are. Supersedes calling `/analyze-window` and `.../assess` separately. |
+| `POST /headset-fit/sessions/{id}/assess` | Fit only, no smoothing: scores one window of raw Bluetooth-collected EEG against `headset_fit.BLUETOOTH_HEADSET_FIT_THRESHOLDS` -- a different scale than `/analyze-window`'s BrainFlow-calibrated default, because the Elata Web Bluetooth SDK's Athena decoder reports EEG in different absolute units than BrainFlow's board driver does for the same physical contact (see the doc comment on `BLUETOOTH_HEADSET_FIT_THRESHOLDS`). Body: `{samples, channelIds}` -- `channelIds` is one label per column of `samples` (e.g. `["TP9","AF7","AF8","TP10"]`, or that plus `AUX1`-`AUX4` for the raw 8-channel Athena stream; non-electrode channels are dropped server-side, see `select_scalp_electrode_indices`). Returns a `SignalQualityMetadata` with `state`/`ready`/`worn`/`blockers`/`channels` filled in -- `ready` only turns `true` after sustained good contact across repeated calls on the same `fitSessionId`, the way a BrainFlow session's does. |
+| `POST /headset-fit/sessions/{id}/calibration/start` | Begin collecting this Bluetooth session's valence/arousal baseline (24 windows) -- the Bluetooth counterpart of `POST /sessions/{id}/calibration/start` below. |
+| `POST /headset-fit/sessions/{id}/calibration/reset` | Clear the baseline and stop calibrating. |
+| `GET /headset-fit/sessions/{id}/calibration` | Current `{status, progress, required}` for this Bluetooth session. |
+| `DELETE /headset-fit/sessions/{id}` | Stops and releases an analysis session. Idle sessions are also evicted automatically after ~2 minutes of disuse. |
 | `POST /sessions` | Starts a live BrainFlow board session. Body: `{deviceId, macAddress?, serialNumber?}`. Returns `{sessionId, state, deviceInfo}`. |
 | `GET /sessions/{id}/stream` | Server-Sent Events stream of normalized `signalFrame` events (each with smoothed/calibrated `features` and `quality`), plus `state` and `error` events. |
 | `DELETE /sessions/{id}` | Stops and releases a session. |
@@ -114,10 +135,11 @@ values to a z-score and squash that through `tanh`.
 | `BaselineCollector(sample_count=24)` | accumulating a baseline over a session | `.accept(value)`, `.median()`, `.stats()`, `.is_full`, `.collected`, `.reset()` -- collection freezes once full, matching the TS behavior of a fixed (not sliding) baseline window |
 
 `affective_state.py` and `training.py` both build on this rather than each
-having their own baseline math (the bundled app's own `attentionMetric.ts`
-and `affectiveStateMetric.ts` currently don't -- the latter still uses a
-simpler, less robust flat-offset calibration; this package intentionally
-doesn't carry that forward).
+having their own baseline math. The bundled app's `affectiveStateMetric.ts`
+relays these already-calibrated scores straight through for a real
+connection instead of recomputing them; its own local calibration (a
+simpler flat-offset, not this module's z-score) only runs as a fallback for
+sources with no server behind them at all, like the Mock provider.
 
 ### `affective_state.py` -- valence/arousal, calibration, state labelling (built on `metrics.py` and `baseline.py`)
 
@@ -218,11 +240,39 @@ instance -- `ready` will always be `False` since readiness requires
 sustained good contact over `thresholds.stable_ready_ms`, which one window
 can't demonstrate. This is exactly what `/analyze-window` does.
 
+`DEFAULT_HEADSET_FIT_THRESHOLDS` is calibrated for BrainFlow's own board
+driver. `BLUETOOTH_HEADSET_FIT_THRESHOLDS` is a second profile for EEG
+collected via the Elata Web Bluetooth SDK's Athena decoder instead, which
+reports the same physical contact state at roughly 1/4-1/7th the absolute
+scale (see the doc comment on `BLUETOOTH_HEADSET_FIT_THRESHOLDS` for the
+paired worn/unworn measurements this was calibrated against) -- see
+`analysis.py` below for what hands out
+`HeuristicHeadsetFitProvider(BLUETOOTH_HEADSET_FIT_THRESHOLDS)` instances,
+one per Bluetooth connection. `select_scalp_electrode_indices` drops
+non-electrode channels (the Athena stream's AUX1-4) before scoring, given a
+list of channel labels.
+
+### `analysis.py` -- the shared per-connection pipeline (needs `brainflow` for full feature extraction, falls back gracefully)
+
+The one place a raw EEG window becomes headset fit + smoothed scores +
+Training's baseline score, used by *both* transports so their smoothing
+can't drift apart.
+
+| Function/class | Call it when you have... | Returns |
+|---|---|---|
+| `AnalysisProviders(headset_fit, affective_state=AffectiveStateProvider(), attention=AttentionBaselineProvider())` | one live connection's whole lifetime and want to bundle its stateful providers together | dataclass; construct once per connection |
+| `analyze_window(providers=, channels=, eeg_samples=, raw_window=, sample_rate=, processing=DEFAULT_PROCESSING, at_ms=None)` | one window plus the connection's `AnalysisProviders` | `WindowAnalysis(fit_snapshot, quality, features, training)` -- `features`/`training` are `None` when `raw_window` is `None` (fit is still assessed) |
+| `AnalysisSessionStore(idle_timeout_s=120.0)` | registering one `AnalysisProviders` per Bluetooth connection, keyed by an opaque id | `.create(thresholds=BLUETOOTH_HEADSET_FIT_THRESHOLDS)` -> `session_id`; `.get(session_id)` -> `AnalysisProviders` (raises `KeyError` if unknown/evicted); `.stop(session_id)` |
+
+`runtime.BrainFlowSession` and `app.py`'s `/headset-fit/sessions/{id}/analyze-window`
+both call `analyze_window()` with their own connection's `AnalysisProviders`
+-- neither reimplements the smoothing/calibration/baseline math itself.
+
 ### `runtime.py` -- BrainFlow session lifecycle and HTTP/SSE wiring (needs `brainflow`)
 
 | Class | Use it for |
 |---|---|
-| `BrainFlowSession(config, mac_address=None, serial_number=None, processing=DEFAULT_PROCESSING)` | Owns one BoardShim session end-to-end: `.prepare()` connects and returns `DeviceInfo`, `.start()` begins streaming, `.frames()` is an async generator of normalized `SignalFrame`s (each already scored via its own internal `AffectiveStateProvider` + `HeuristicHeadsetFitProvider` + `AttentionBaselineProvider`), `.stop()` releases it. Also exposes `.start_calibration()`, `.reset_calibration()`, `.get_calibration_state()`, `.get_training_calibration_profile()`. |
+| `BrainFlowSession(config, mac_address=None, serial_number=None, processing=DEFAULT_PROCESSING)` | Owns one BoardShim session end-to-end: `.prepare()` connects and returns `DeviceInfo`, `.start()` begins streaming, `.frames()` is an async generator of normalized `SignalFrame`s (each already scored via `analysis.analyze_window()` and its own internal `AnalysisProviders`), `.stop()` releases it. Also exposes `.start_calibration()`, `.reset_calibration()`, `.get_calibration_state()`, `.get_training_calibration_profile()`. |
 | `SessionStore()` | In-memory registry of active sessions, used by `app.py`: `.create(device_id, **kwargs)`, `.get(session_id)`, `.stop(session_id)`, `.stop_all()`. |
 
 If you want the raw hardware pipeline without running the HTTP service, use

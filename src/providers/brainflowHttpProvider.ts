@@ -37,6 +37,20 @@ export class BrainFlowHttpProvider implements EegProvider {
     return this.deviceInfo;
   }
 
+  async startAffectiveCalibration() {
+    if (!this.sessionId) return;
+    await fetch(`${this.serviceUrl}/sessions/${this.sessionId}/calibration/start`, {
+      method: "POST",
+    });
+  }
+
+  async resetAffectiveCalibration() {
+    if (!this.sessionId) return;
+    await fetch(`${this.serviceUrl}/sessions/${this.sessionId}/calibration/reset`, {
+      method: "POST",
+    });
+  }
+
   async connectAndStart() {
     await this.disconnect("Preparing a fresh BrainFlow session");
     this.events.onState("connecting", "Connecting to BrainFlow service");

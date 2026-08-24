@@ -28,12 +28,43 @@ export interface SignalChannelQualityMetadata {
   message?: string;
 }
 
+export type HeadsetFitAssessmentState = "poor" | "adjusting" | "good" | "ready";
+export type HeadsetFitAssessmentChannelState = "poor" | "adjusting" | "good";
+
+/** Per-channel breakdown from a server-computed headset-fit assessment --
+ * mirrors `brainflow_service/models.py`'s `ChannelSignalQualityModel`. */
+export interface HeadsetFitAssessmentChannel {
+  channel: SignalChannel;
+  state: HeadsetFitAssessmentChannelState;
+  score: number;
+  rmsUv: number;
+  stdDevUv: number;
+  peakToPeakUv: number;
+  meanStepUv: number;
+  maxAbsUv: number;
+  maxStepUv: number;
+  clippedFraction: number;
+  message: string;
+}
+
 export interface SignalQualityMetadata {
   source: "device" | "inferred";
   channelQualities?: SignalChannelQualityMetadata[];
   excessiveArtifact?: boolean;
   worn?: boolean;
   message?: string;
+  // A full server-computed headset-fit assessment -- present when `source`
+  // is a `brainflow_service` endpoint that runs `headset_fit.py` itself
+  // (`/sessions/{id}/stream`, `/analyze-window`, and
+  // `/headset-fit/sessions/{id}/assess`), so the client can display it
+  // directly instead of re-deriving fit from raw samples. See
+  // `App.tsx`'s `snapshotFromServerFit`.
+  state?: HeadsetFitAssessmentState;
+  ready?: boolean;
+  blockers?: string[];
+  channels?: HeadsetFitAssessmentChannel[];
+  stableForMs?: number;
+  requiredStableMs?: number;
 }
 
 export interface BandPowerFeatures {
@@ -48,6 +79,50 @@ export interface SignalFeatures {
   bandPowers?: BandPowerFeatures | null;
   brainflowConcentration?: number | null;
   brainflowRestfulness?: number | null;
+
+  // Finished, display-ready 0-100 scores and the valence/arousal proxy,
+  // computed and smoothed entirely by `brainflow_service` -- see
+  // `metrics.MindStateSmoother` and `affective_state.AffectiveStateProvider`.
+  // Both connection methods (BrainFlow's `/sessions/{id}/stream` and
+  // Bluetooth's `/headset-fit/sessions/{id}/analyze-window`) populate these
+  // the same way, from the same per-connection smoothing state, so the
+  // frontend never needs its own copy of this math for a real connection --
+  // see `metrics/affectiveStateMetric.ts`'s `AffectiveStateProvider.pushFrame`.
+  mindfulnessScore?: number | null;
+  restfulnessScore?: number | null;
+  focusScore?: number | null;
+  relaxScore?: number | null;
+  valence?: number | null;
+  arousal?: number | null;
+  rawValence?: number | null;
+  rawArousal?: number | null;
+  stateLabel?: string | null;
+  confidence?: number | null;
+  calibrationActive?: boolean;
+  calibrationStatus?: "off" | "collecting" | "active";
+  calibrationProgress?: number;
+  calibrationRequired?: number;
+}
+
+/** Training's baseline-relative attention score -- mirrors
+ * `brainflow_service/models.py`'s `AttentionMetricSampleModel`. */
+export interface TrainingMetricSample {
+  displayedScore: number | null;
+  restfulnessScore: number | null;
+  focusScore: number | null;
+  relaxScore: number | null;
+  rawRatio: number;
+  baselineRatio: number | null;
+  rawBrainflowMindfulness: number | null;
+  baselineBrainflowMindfulness: number | null;
+  baselineRelativeValue: number | null;
+  baselineZScore: number | null;
+  rawBrainflowRestfulness: number | null;
+  baselineBrainflowRestfulness: number | null;
+  restfulnessBaselineRelativeValue: number | null;
+  restfulnessBaselineZScore: number | null;
+  scoreSource: "brainflow_mindfulness" | "unavailable";
+  restfulnessScoreSource: "brainflow_restfulness" | "unavailable";
 }
 
 export interface SensorCapability {
@@ -75,6 +150,7 @@ export interface SignalFrame {
   sequenceId: number;
   quality?: SignalQualityMetadata;
   features?: SignalFeatures | null;
+  training?: TrainingMetricSample | null;
 }
 
 export interface EegFrameSummary {

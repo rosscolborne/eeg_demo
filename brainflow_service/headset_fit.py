@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from .models import ChannelSignalQualityModel, SignalChannel, SignalQualityMetadata
@@ -56,6 +56,61 @@ class HeadsetFitThresholds:
 
 
 DEFAULT_HEADSET_FIT_THRESHOLDS = HeadsetFitThresholds()
+
+
+# Thresholds for EEG captured by the Elata Web Bluetooth SDK's Athena WASM
+# decoder (as opposed to BrainFlow's own board driver, which
+# `DEFAULT_HEADSET_FIT_THRESHOLDS` is tuned against).
+#
+# That decoder reports EEG in different absolute units than BrainFlow does
+# for the exact same physical electrode and contact state -- paired
+# on-device measurements (worn vs. resting unworn, same headset, same
+# session) came out roughly 4-7x smaller on this path across every channel:
+#
+#              worn (good)         resting on desk (not worn)
+#   std_dev_uv    10 - 179 uV          570 - 575 uV
+#   max_step_uv   37 - 393 uV         1217 - 1278 uV
+#   peak_to_peak_uv 33 - 502 uV        1450 uV
+#
+# `DEFAULT_HEADSET_FIT_THRESHOLDS`'s `max_good_*` ceilings never trip at
+# this scale -- a resting, unworn headset's noise floor here still reads
+# as "good" against them. These ceilings instead sit at the midpoint of
+# the measured worn/unworn gap above, so they clear real worn contact
+# (including the noisier rear TP9/TP10 channels) with margin while still
+# catching the unworn case. `max_good_mean_step_uv` wasn't directly
+# measured -- it's scaled down by the same ratio as the others for
+# consistency, and is redundant with `max_good_std_dev_uv`/
+# `max_good_step_uv` above via the `or` they're combined with in
+# `_infer_channel_state`, so an imprecise value here can't reopen the
+# false-"good" gap. Every other field (contact-count rules, flat/clipped/
+# excessive-noise cutoffs) isn't in play at these measured levels, so it's
+# left at the default.
+BLUETOOTH_HEADSET_FIT_THRESHOLDS = replace(
+    DEFAULT_HEADSET_FIT_THRESHOLDS,
+    max_good_std_dev_uv=320,
+    max_good_peak_to_peak_uv=850,
+    max_good_mean_step_uv=300,
+    max_good_step_uv=700,
+)
+
+# The four scalp-contact EEG electrodes on a Muse headband. The Elata Web
+# Bluetooth SDK's Athena decoder additionally reports AUX1-4 as "EEG"
+# channels, but those are auxiliary/reference inputs, not electrodes worn
+# against skin -- BrainFlow's own board config for the same hardware
+# (`get_eeg_channels`/`get_eeg_names` for `MUSE_S_ATHENA_BOARD`) only ever
+# exposes these four, and an unconnected AUX input reads as a clean,
+# plausible EEG trace whether or not the headband is on a head, which is
+# enough on its own to make a resting headset look worn if left in the mix.
+SCALP_ELECTRODE_IDS = frozenset({"tp9", "af7", "af8", "tp10"})
+
+
+def select_scalp_electrode_indices(channel_ids: list[str]) -> list[int]:
+    """Indices of `channel_ids` that are scalp electrodes -- see
+    `SCALP_ELECTRODE_IDS`. Falls back to every index when none are
+    recognized, so a caller streaming an unrecognized channel layout still
+    gets an assessment rather than losing all of its channels."""
+    indices = [index for index, channel_id in enumerate(channel_ids) if channel_id.lower() in SCALP_ELECTRODE_IDS]
+    return indices if indices else list(range(len(channel_ids)))
 
 
 @dataclass(frozen=True)

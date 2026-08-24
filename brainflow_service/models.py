@@ -54,6 +54,17 @@ class SignalFeatures(BaseModel):
     confidence: float | None = None
     calibration_active: bool = Field(default=False, alias="calibrationActive")
 
+    # This connection's valence/arousal calibration progress (see
+    # `affective_state.AffectiveStateProvider.get_calibration_state` and the
+    # `/sessions/{id}/calibration*` / `/headset-fit/sessions/{id}/calibration*`
+    # endpoints that start/reset it). Riding along on every window means a
+    # caller doesn't need a separate poll to show calibration progress.
+    calibration_status: Literal["off", "collecting", "active"] = Field(
+        default="off", alias="calibrationStatus",
+    )
+    calibration_progress: int = Field(default=0, alias="calibrationProgress")
+    calibration_required: int = Field(default=0, alias="calibrationRequired")
+
 
 class ChannelSignalQualityModel(BaseModel):
     """Per-channel signal-quality breakdown, from
